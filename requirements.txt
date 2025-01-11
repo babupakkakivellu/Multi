@@ -1,0 +1,11 @@
+# Core dependencies
+pyrogram>=2.0.106
+tgcrypto>=1.2.5
+python-dotenv>=1.0.0
+humanize>=4.9.0
+aiofiles>=23.2.1
+aiohttp>=3.9.1
+async-timeout>=4.0.3
+
+# Optional but recommended for better performance
+uvloop>=0.17.0
