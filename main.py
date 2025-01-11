@@ -1,9 +1,11 @@
 # Part 1: Imports and Global Variables
 import asyncio
 import os
+import json
 import re
 import time
 from datetime import timedelta
+from typing import Set
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
@@ -617,7 +619,6 @@ async def cancel_command(client, message: Message):
     except Exception as e:
         await message.reply_text(f"❌ **Error:** {str(e)}")
 
-# Part 5A: Callback Handlers - Compression Settings
 
 @app.on_callback_query()
 async def handle_callback(client, callback_query: CallbackQuery):
@@ -785,15 +786,6 @@ async def handle_callback(client, callback_query: CallbackQuery):
                 reply_markup=create_settings_menu(settings)
             )
 
-    except Exception as e:
-        error_msg = f"❌ **Error:** {str(e)}"
-        try:
-            await callback_query.answer(error_msg, show_alert=True)
-        except:
-            await callback_query.message.edit_text(error_msg)
-
-        # Part 5B: Callback Handlers - Processing and Upload
-
         # Start Processing
         elif data == "start_compress":
             settings = user_data[user_id]['compression_settings']
@@ -827,7 +819,6 @@ async def handle_callback(client, callback_query: CallbackQuery):
 
                 if success:
                     user_data[user_id]['compressed_file'] = output_file
-                    # Show upload format selection directly
                     await status_msg.edit_text(
                         "✅ **Compression Complete!**\n\n"
                         "Choose upload format:",
@@ -865,21 +856,17 @@ async def handle_callback(client, callback_query: CallbackQuery):
             
             try:
                 input_file = user_data[user_id]['compressed_file']
-                # Use original filename if no new name provided
                 new_filename = user_data[user_id].get('new_filename', 
                     os.path.splitext(os.path.basename(input_file))[0])
                 
-                # Extract thumbnail and metadata
                 thumb_data = await extract_thumbnail(input_file)
                 if not thumb_data:
                     raise Exception("Failed to extract video metadata")
 
-                # Calculate compression ratio
                 original_size = os.path.getsize(user_data[user_id]['file_path'])
                 compressed_size = os.path.getsize(input_file)
                 ratio = (1 - (compressed_size / original_size)) * 100
 
-                # Prepare caption
                 settings = user_data[user_id]['compression_settings']
                 caption = (
                     f"**{new_filename}**\n\n"
@@ -969,13 +956,132 @@ async def handle_callback(client, callback_query: CallbackQuery):
                 ])
             )
 
+        # Handle Stream Selection
+        elif data == "remove_streams":
+            video_info = user_data[user_id]['video_info']
+            buttons = []
+            
+            # Add video streams
+            for i, stream in enumerate(video_info['streams']['video']):
+                buttons.append([InlineKeyboardButton(
+                    f"🎥 Video: {stream['width']}x{stream['height']} ({stream['codec']})",
+                    callback_data=f"stream_{i}"
+                )])
+            
+            # Add audio streams
+            for i, stream in enumerate(video_info['streams']['audio'], len(video_info['streams']['video'])):
+                lang = stream['language']
+                title = f" - {stream['title']}" if stream['title'] else ""
+                buttons.append([InlineKeyboardButton(
+                    f"🔊 Audio: {lang}{title} ({stream['codec']})",
+                    callback_data=f"stream_{i}"
+                )])
+            
+            # Add subtitle streams
+            start_idx = len(video_info['streams']['video']) + len(video_info['streams']['audio'])
+            for i, stream in enumerate(video_info['streams']['subtitle'], start_idx):
+                lang = stream['language']
+                title = f" - {stream['title']}" if stream['title'] else ""
+                buttons.append([InlineKeyboardButton(
+                    f"💬 Subtitle: {lang}{title}",
+                    callback_data=f"stream_{i}"
+                )])
+            
+            buttons.append([InlineKeyboardButton("✅ Continue", callback_data="process_streams")])
+            buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
+            
+            await callback_query.message.edit_text(
+                "**✂️ Select Streams to Remove:**\n\n"
+                "• Click to toggle stream removal\n"
+                "• Selected streams will be removed\n"
+                "• Click Continue when done",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+
+        # Handle Stream Toggle
+        elif data.startswith("stream_"):
+            stream_idx = int(data.split("_")[1])
+            if stream_idx in user_data[user_id]['selected_streams']:
+                user_data[user_id]['selected_streams'].remove(stream_idx)
+            else:
+                user_data[user_id]['selected_streams'].add(stream_idx)
+            
+            # Recreate stream selection menu with updated selections
+            video_info = user_data[user_id]['video_info']
+            buttons = []
+            
+            # Add video streams
+            for i, stream in enumerate(video_info['streams']['video']):
+                selected = "✅ " if i in user_data[user_id]['selected_streams'] else ""
+                buttons.append([InlineKeyboardButton(
+                    f"{selected}🎥 Video: {stream['width']}x{stream['height']} ({stream['codec']})",
+                    callback_data=f"stream_{i}"
+                )])
+            
+            # Add audio streams
+            for i, stream in enumerate(video_info['streams']['audio'], len(video_info['streams']['video'])):
+                selected = "✅ " if i in user_data[user_id]['selected_streams'] else ""
+                lang = stream['language']
+                title = f" - {stream['title']}" if stream['title'] else ""
+                buttons.append([InlineKeyboardButton(
+                    f"{selected}🔊 Audio: {lang}{title} ({stream['codec']})",
+                    callback_data=f"stream_{i}"
+                )])
+            
+            # Add subtitle streams
+            start_idx = len(video_info['streams']['video']) + len(video_info['streams']['audio'])
+            for i, stream in enumerate(video_info['streams']['subtitle'], start_idx):
+                selected = "✅ " if i in user_data[user_id]['selected_streams'] else ""
+                lang = stream['language']
+                title = f" - {stream['title']}" if stream['title'] else ""
+                buttons.append([InlineKeyboardButton(
+                    f"{selected}💬 Subtitle: {lang}{title}",
+                    callback_data=f"stream_{i}"
+                )])
+            
+            buttons.append([InlineKeyboardButton("✅ Continue", callback_data="process_streams")])
+            buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
+            
+            await callback_query.message.edit_reply_markup(
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+
+        # Process Stream Removal
+        elif data == "process_streams":
+            if not user_data[user_id]['selected_streams']:
+                await callback_query.answer("No streams selected to remove!", show_alert=True)
+                return
+
+            status_msg = await callback_query.message.edit_text("🔄 Processing streams...")
+            
+            try:
+                output_file = await process_video(
+                    user_data[user_id]['file_path'],
+                    user_data[user_id]['selected_streams'],
+                    len(user_data[user_id]['video_info']['streams'])
+                )
+                
+                user_data[user_id]['compressed_file'] = output_file
+                await status_msg.edit_text(
+                    "✅ **Streams Removed Successfully!**\n\n"
+                    "Choose upload format:",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📹 Send as Video", callback_data="upload_video"),
+                         InlineKeyboardButton("📄 Send as Document", callback_data="upload_document")],
+                        [InlineKeyboardButton("✏️ Rename File", callback_data="rename_file")],
+                        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+                    ])
+                )
+            
+            except Exception as e:
+                await status_msg.edit_text(f"❌ **Error:** {str(e)}")
+
     except Exception as e:
         error_msg = f"❌ **Error:** {str(e)}"
         try:
             await callback_query.answer(error_msg, show_alert=True)
         except:
             await callback_query.message.edit_text(error_msg)
-
 # Start the bot
 print("🚀 Bot is starting...")
 app.run()
