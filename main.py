@@ -642,6 +642,235 @@ async def handle_callback(client, callback_query: CallbackQuery):
     try:
         user_id = callback_query.from_user.id
         data = callback_query.data
+
+        if user_id not in user_data and data not in ["show_help", "cancel"]:
+            await callback_query.answer("Session expired. Please send video again.", show_alert=True)
+            return
+        
+        if data == "header":
+            await callback_query.answer("Section header")
+            return
+
+        # Help Message
+        if data == "show_help":
+            await callback_query.message.edit_text(
+                HELP_TEXT,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅️ Back", callback_data="back_to_start")
+                ]])
+            )
+
+        elif data == "back_to_start":
+            await callback_query.message.edit_text(
+                "**🎥 Welcome to Video Processing Bot!**\n\n"
+                "Send me any video file to:\n"
+                "• 🎯 Compress with HEVC (x265)\n"
+                "• ✂️ Remove unwanted streams\n"
+                "• 📊 Adjust quality (CRF 15-30)\n"
+                "• 🎨 Choose pixel format\n"
+                "• ✏️ Rename output file\n\n"
+                "**Features:**\n"
+                "• Advanced compression\n"
+                "• 10-bit support\n"
+                "• Multiple presets\n"
+                "• Stream selection\n"
+                "• Progress tracking\n\n"
+                "ℹ️ Send any video to start processing!",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💡 Help", callback_data="show_help")],
+                    [InlineKeyboardButton("👨‍💻 Developer", url="https://t.me/YourUsername")]
+                ])
+            )
+
+        # Compression Settings
+        elif data == "compress_start":
+            settings = user_data[user_id]['compression_settings']
+            await callback_query.message.edit_text(
+                "**⚙️ Compression Settings**\n\n"
+                f"Current Settings:\n"
+                f"• Preset: `{settings['preset']}`\n"
+                f"• CRF Value: `{settings['crf']}`\n"
+                f"• Pixel Format: `{settings['pixel_format']}`\n"
+                f"• Audio: `{'Copy' if settings['copy_audio'] else 'Re-encode'}`\n"
+                f"• Subtitles: `{'Copy' if settings['copy_subs'] else 'Remove'}`\n\n"
+                "Select option to modify:",
+                reply_markup=create_settings_menu(settings)
+            )
+
+        # Show Preset Selection
+        elif data == "show_preset":
+            buttons = []
+            row = []
+            current_preset = user_data[user_id]['compression_settings']['preset']
+            
+            for preset in COMPRESSION_SETTINGS['presets']:
+                current = "✅ " if preset == current_preset else ""
+                row.append(InlineKeyboardButton(f"{current}{preset}", callback_data=f"preset_{preset}"))
+                if len(row) == 2:
+                    buttons.append(row)
+                    row = []
+            if row:
+                buttons.append(row)
+            
+            buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="compress_start")])
+            
+            await callback_query.message.edit_text(
+                "**⚙️ Select Encoding Preset:**\n\n"
+                "• ultrafast = Fastest, largest size\n"
+                "• medium = Balanced option\n"
+                "• veryslow = Best compression, slowest\n\n"
+                f"Current: `{current_preset}`",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+
+        # Show CRF Selection
+        elif data == "show_crf":
+            buttons = []
+            row = []
+            current_crf = user_data[user_id]['compression_settings']['crf']
+            
+            for crf in range(15, 31):
+                current = "✅ " if crf == current_crf else ""
+                row.append(InlineKeyboardButton(f"{current}{crf}", callback_data=f"crf_{crf}"))
+                if len(row) == 4:
+                    buttons.append(row)
+                    row = []
+            if row:
+                buttons.append(row)
+            
+            buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="compress_start")])
+            
+            await callback_query.message.edit_text(
+                "**📊 Select CRF Value:**\n\n"
+                "• 15-18 = Visually lossless\n"
+                "• 19-23 = High quality\n"
+                "• 24-27 = Medium quality\n"
+                "• 28-30 = Low quality\n\n"
+                f"Current: `{current_crf}`",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+
+        # Show Pixel Format Selection
+        elif data == "show_pixfmt":
+            buttons = []
+            current_fmt = user_data[user_id]['compression_settings']['pixel_format']
+            
+            for fmt, desc in COMPRESSION_SETTINGS['pixel_formats']:
+                current = "✅ " if fmt == current_fmt else ""
+                buttons.append([InlineKeyboardButton(
+                    f"{current}{desc}", callback_data=f"pixfmt_{fmt}"
+                )])
+            
+            buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="compress_start")])
+            
+            await callback_query.message.edit_text(
+                "**🎨 Select Pixel Format:**\n\n"
+                "• 8-bit = Standard compatibility\n"
+                "• 10-bit = Better quality, HDR support\n"
+                "• 10-bit High = Best quality, larger size\n\n"
+                f"Current: `{current_fmt}`",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+
+        # Handle Setting Updates
+        elif data.startswith(("preset_", "pixfmt_", "crf_")):
+            setting_type, value = data.split("_")
+            settings = user_data[user_id]['compression_settings']
+            
+            if setting_type == "preset":
+                settings['preset'] = value
+            elif setting_type == "pixfmt":
+                settings['pixel_format'] = value
+            elif setting_type == "crf":
+                settings['crf'] = int(value)
+            
+            await callback_query.answer(f"{setting_type.title()} updated!")
+            await callback_query.message.edit_text(
+                "**⚙️ Compression Settings**\n\n"
+                f"• Preset: `{settings['preset']}`\n"
+                f"• CRF: `{settings['crf']}`\n"
+                f"• Pixel Format: `{settings['pixel_format']}`\n"
+                f"• Audio: `{'Copy' if settings['copy_audio'] else 'Re-encode'}`\n"
+                f"• Subtitles: `{'Copy' if settings['copy_subs'] else 'Remove'}`\n\n"
+                "Select option to modify:",
+                reply_markup=create_settings_menu(settings)
+            )
+
+        # Toggle Audio/Subtitle Settings
+        elif data in ["toggle_audio", "toggle_subs"]:
+            settings = user_data[user_id]['compression_settings']
+            if data == "toggle_audio":
+                settings['copy_audio'] = not settings['copy_audio']
+            else:
+                settings['copy_subs'] = not settings['copy_subs']
+            
+            await callback_query.message.edit_reply_markup(
+                reply_markup=create_settings_menu(settings)
+            )
+
+        # Start Compression Process
+        elif data == "start_compress":
+            settings = user_data[user_id]['compression_settings']
+            input_file = user_data[user_id]['file_path']
+            output_file = f"compressed_{os.path.basename(input_file)}"
+            status_msg = await callback_query.message.edit_text(
+                "🔄 **Preparing Compression**\n\n"
+                "Building FFmpeg command..."
+            )
+
+            try:
+                command = [
+                    "ffmpeg", "-y",
+                    "-i", input_file,
+                    "-c:v", "libx265",
+                    "-preset", settings['preset'],
+                    "-crf", str(settings['crf']),
+                    "-pix_fmt", settings['pixel_format']
+                ]
+
+                if settings['copy_audio']:
+                    command.extend(["-c:a", "copy"])
+                else:
+                    command.extend(["-c:a", "aac", "-b:a", "128k"])
+
+                if settings['copy_subs']:
+                    command.extend(["-c:s", "copy"])
+                else:
+                    command.extend(["-sn"])
+
+                command.append(output_file)
+
+                # Run compression with progress
+                success = await run_ffmpeg_with_progress(command, status_msg, input_file)
+
+                if success:
+                    user_data[user_id]['compressed_file'] = output_file
+                    await status_msg.edit_text(
+                        "✅ **Compression Complete!**\n\n"
+                        "Now:\n"
+                        "1️⃣ Rename the file (mandatory)\n"
+                        "2️⃣ Choose upload format",
+                        reply_markup=create_final_menu()
+                    )
+                else:
+                    raise Exception("Compression failed")
+
+            except Exception as e:
+                await status_msg.edit_text(f"❌ **Error:** {str(e)}")
+                if os.path.exists(output_file):
+                    os.remove(output_file)
+
+        # Handle Rename
+        elif data == "rename_file":
+            user_data[user_id]['awaiting_rename'] = True
+            await callback_query.message.edit_text(
+                "**✏️ Send new filename:**\n\n"
+                "• Send the name without extension\n"
+                "• /cancel to keep original name",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅️ Back", callback_data="start_compress")
+                ]])
+            )
         
         # ... (previous handlers remain same until upload handling)
 
