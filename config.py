@@ -1,8 +1,8 @@
 class Config:
     # Replace these with your actual values
-    API_ID = "YOUR_API_ID"
-    API_HASH = "YOUR_API_HASH"
-    BOT_TOKEN = "YOUR_BOT_TOKEN"
+    API_ID = "16501053"
+    API_HASH = "d8c9b01c863dabacc484c2c06cdd0f6e"
+    BOT_TOKEN = "6738287955:AAE5lXdu_kbQevdyImUIJ84CTwwNhELjHK4"
 
     # Bot messages
     START_MSG = """**🎥 Video Processor Bot**
