@@ -12,9 +12,9 @@ from datetime import datetime, timedelta
 # Bot configuration
 app = Client(
     "stream_remover_bot",
-    api_id="YOUR_API_ID",
-    api_hash="YOUR_API_HASH",
-    bot_token="YOUR_BOT_TOKEN"
+    api_id="16501053",
+    api_hash="d8c9b01c863dabacc484c2c06cdd0f6e",
+    bot_token="6738287955:AAE5lXdu_kbQevdyImUIJ84CTwwNhELjHK4"
 )
 
 # Compression Settings
