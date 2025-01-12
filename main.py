@@ -734,126 +734,97 @@ async def handle_callback(client, callback_query: CallbackQuery):
             await process_compression_settings(callback_query.message, user)
 
         # Process Handlers (Both Compression and Stream Removal)
-        elif data == "continue" or data == "compress_process":
-            processing_type = user.get('processing_type', 'unknown')
-            start_time = time.time()
+        try:
+            if data == "continue" or data == "compress_process":
+                start_time = time.time()
+                progress_handler = ProgressHandler()
             
-            status_msg = await callback_query.message.edit_text(
-                f"⚙️ {'Compressing' if processing_type == 'compress' else 'Processing'} video...\n\n"
-                "┌ **Status:** Initializing\n"
-                "└ **Progress:** 0%"
-
-            progress_handler = ProgressHandler()
-            start_time = time.time()
+                status_msg = await callback_query.message.edit_text(
+                    "⚙️ Initializing process..."
+                )
             
-            # Create progress callback for upload
-            upload_callback = create_progress_callback(
-                progress_handler,
-                status_msg,
-                start_time,
-                "Uploading"
-            )
-            
-            try:
-                if processing_type == 'compress':
-                    output_file = await compress_video(
-                        user['file_path'],
-                        user['compression_settings'],
-                        status_msg,
-                        start_time
-                    )
-                else:  # remove_streams
-                    output_file = await process_video(
-                        user['file_path'],
-                        user['selected_streams'],
-                        len(user['streams']),
-                        status_msg
-                    )
-
-                # Extract thumbnail and metadata
-                thumb_data = await extract_thumbnail(output_file)
-                
-                # Handle filename
-                if user.get('new_filename'):
-                    filename = f"{user['new_filename']}{os.path.splitext(output_file)[1]}"
-                    new_path = os.path.join(os.path.dirname(output_file), filename)
-                    os.rename(output_file, new_path)
-                    output_file = new_path
-                else:
-                    filename = os.path.basename(output_file)
-
-                # Prepare caption
-                original_size = os.path.getsize(user['file_path'])
-                processed_size = os.path.getsize(output_file)
-                
-                if processing_type == 'compress':
-                    settings = user['compression_settings']
-                    caption = (
-                        f"**{filename}**\n\n"
-                        f"┌ **Codec:** {settings['video_format'].upper()}\n"
-                        f"├ **Resolution:** {settings['resolution']}p\n"
-                        f"├ **Preset:** {settings['preset']}\n"
-                        f"├ **CRF:** {settings['crf']}\n"
-                        f"├ **Original Size:** {format_size(original_size)}\n"
-                        f"├ **New Size:** {format_size(processed_size)}\n"
-                        f"└ **Saved:** {format_size(original_size - processed_size)} "
-                        f"({((original_size - processed_size)/original_size)*100:.1f}%)"
-                    )
-                else:
-                    caption = (
-                        f"**{filename}**\n\n"
-                        f"┌ **Streams Removed:** {len(user['selected_streams'])}\n"
-                        f"├ **Original Size:** {format_size(original_size)}\n"
-                        f"└ **New Size:** {format_size(processed_size)}"
-                    )
-
-                # Upload progress wrapper
-                async def progress_wrapper(current, total):
-                    await progress(current, total, status_msg, start_time, "upload")
-
-                # Send the processed file
-                if data == "upload_video" or processing_type == 'compress':
-                await client.send_video(
-                    callback_query.message.chat.id,
-                    output_file,
-                    caption=caption,
-                    duration=thumb_data['duration'] if thumb_data else None,
-                    width=thumb_data['width'] if thumb_data else None,
-                    height=thumb_data['height'] if thumb_data else None,
-                    thumb=thumb_data['thumb_path'] if thumb_data else None,
-                    progress=upload_callback
-                )
-            else:
-                await client.send_document(
-                    callback_query.message.chat.id,
-                    output_file,
-                    caption=caption,
-                    thumb=thumb_data['thumb_path'] if thumb_data else None,
-                    progress=upload_callback
-                )
-
-                await status_msg.edit_text(
-                    f"✅ **{processing_type.replace('_', ' ').title()} completed successfully!**\n"
-                    f"Completed at: {current_time}"
-                )
-
-                # Cleanup
-                cleanup_files = [output_file]
-                if thumb_data and thumb_data['thumb_path']:
-                    cleanup_files.append(thumb_data['thumb_path'])
-                
-                for file in cleanup_files:
+                async def update_status(text: str):
                     try:
-                        if os.path.exists(file):
-                            os.remove(file)
+                        await status_msg.edit_text(text)
                     except Exception as e:
-                        print(f"Cleanup error: {str(e)}")
-
-            except Exception as e:
-                await status_msg.edit_text(f"❌ **Processing failed:** {str(e)}")
-            finally:
-                if user_id in user_data:
-                    del user_data[user_id]
+                        print(f"Status update error: {str(e)}")
+            
+                try:
+                    if processing_type == 'compress':
+                        output_file = await compress_video(
+                            user['file_path'],
+                            user['compression_settings'],
+                            update_status,
+                            start_time
+                        )
+                    else:
+                        output_file = await process_video(
+                            user['file_path'],
+                            user['selected_streams'],
+                            status_msg
+                        )    
+                
+                # Get file metadata and prepare for upload
+                    thumb_data = await extract_thumbnail(output_file)
+                    original_size = os.path.getsize(user['file_path'])
+                    processed_size = os.path.getsize(output_file)
+                
+                # Create upload progress handler
+                    upload_start_time = time.time()
+                    async def upload_progress(current, total):
+                        await progress_handler(
+                            current, total,
+                            update_status,
+                            upload_start_time,
+                            "Uploading"
+                        )
+                
+                # Send file with progress
+                    if data == "upload_video" or processing_type == 'compress':
+                        await client.send_video(
+                            callback_query.message.chat.id,
+                            output_file,
+                            caption=create_caption(original_size, processed_size, user),
+                            duration=thumb_data.get('duration'),
+                            width=thumb_data.get('width'),
+                            height=thumb_data.get('height'),
+                            thumb=thumb_data.get('thumb_path'),
+                            progress=upload_progress
+                        )
+                    else:
+                        await client.send_document(
+                            callback_query.message.chat.id,
+                            output_file,
+                            caption=create_caption(original_size, processed_size, user),
+                            thumb=thumb_data.get('thumb_path'),
+                            progress=upload_progress
+                        )
+                
+                # Success message
+                    await status_msg.edit_text("✅ Process completed successfully!")
+                
+                except Exception as e:
+                    await status_msg.edit_text(f"❌ Error: {str(e)}")
+                finally:
+                # Cleanup
+                    cleanup_files = [output_file]
+                    if thumb_data and thumb_data.get('thumb_path'):
+                        cleanup_files.append(thumb_data['thumb_path'])
+                
+                    for file in cleanup_files:
+                        try:
+                            if os.path.exists(file):
+                                os.remove(file)
+                        except Exception as e:
+                            print(f"Cleanup error: {str(e)}")
+                        
+                    if user_id in user_data:
+                        del user_data[user_id]
+                    
+        except Exception as e:
+            await callback_query.message.edit_text(f"❌ Error: {str(e)}")
+            if user_id in user_data:
+                del user_data[user_id]
 
         # Rename Handlers
         elif data == "rename":
