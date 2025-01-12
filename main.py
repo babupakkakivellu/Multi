@@ -649,11 +649,21 @@ async def handle_video(client, message: Message):
             'mode': None  # 'compress' or 'remove_streams'
         }
         
-        # Download video
-        file_path = await message.download(
-            progress=lambda current, total: progress(
-                current, total, status_msg, start_time, "download"
+        # Create progress handler for download
+        progress_handler = ProgressHandler()
+        
+        async def download_progress(current, total):
+            await progress_handler(
+                current,
+                total,
+                lambda text: status_msg.edit_text(text),
+                start_time,
+                "Downloading"
             )
+        
+        # Download video with progress handler
+        file_path = await message.download(
+            progress=download_progress
         )
         
         user_data[message.from_user.id]['file_path'] = file_path
