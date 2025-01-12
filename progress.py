@@ -17,7 +17,7 @@ class ProgressHandler:
                 self._last_update_time = current_time
                 
                 # Calculate progress
-                percent = (current * 100) / total
+                percent = (current * 100) / total if total > 0 else 0
                 bar = self._create_progress_bar(current, total)
                 speed = self._calculate_speed(current, start_time)
                 elapsed = self._format_time(int(current_time - start_time))
@@ -45,13 +45,16 @@ class ProgressHandler:
 
     @staticmethod
     def _create_progress_bar(current: int, total: int) -> str:
+        if total == 0:
+            return "─" * 10
         progress = min(current / total, 1)
         filled_len = int(progress * 10)
         return "━" * filled_len + "─" * (10 - filled_len)
 
     @staticmethod
     def _calculate_speed(current: int, start_time: float) -> str:
-        speed = current / max(time.time() - start_time, 1)
+        elapsed_time = max(time.time() - start_time, 1)
+        speed = current / elapsed_time
         return ProgressHandler._format_size(int(speed))
 
     @staticmethod
