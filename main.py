@@ -534,20 +534,23 @@ async def handle_video(client, message: Message):
             )
             return
         
+        # Validate message has media
+        if not (message.video or message.document):
+            await message.reply_text("❌ Please send a valid video or document file.")
+            return
+            
         # Initialize status message
         status_msg = await message.reply_text(
             "⚡ **Initializing...**\n\n"
             "Please wait while I analyze your file."
         )
         
-        # Validate file size
-        file_size = message.video.file_size if message.video else message.document.file_size
-        if file_size > 2 * 1024 * 1024 * 1024:  # 2GB limit
-            await status_msg.edit_text("❌ File size too large (max 2GB)")
-            return
+        # Get file_id directly from message
+        file_id = message.video.file_id if message.video else message.document.file_id
         
         # Create new session
         session = UserSession()
+        session.file_id = file_id  # Store file_id instead of file_path initially
         user_data[user_id] = session
         session.status_message = status_msg
         
@@ -823,39 +826,33 @@ async def handle_toggle_compress(callback_query: CallbackQuery, session: UserSes
 
 async def handle_continue(client, callback_query: CallbackQuery, session: UserSession):
     """Handle continue button press"""
-    if not any(session.settings[op]['enabled'] for op in ['remove_streams', 'compression']):
-        await callback_query.answer("Please select at least one operation!", show_alert=True)
-        return
-    
-    # Start downloading
-    start_time = time.time()
-    await callback_query.message.edit_text("📥 **Downloading file...**")
-    
-    async def progress_wrapper(current, total):
-        await progress(current, total, callback_query.message, start_time, "Downloading")
-    
-    session.file_path = await callback_query.message.reply_to_message.download(
-        progress=progress_wrapper
-    )
-    
-    # Show appropriate next menu
-    if session.settings['remove_streams']['enabled']:
-        session.streams = get_streamsinfo(session.file_path)
-        buttons = ButtonManager.create_stream_buttons(session.streams, set())
-        await callback_query.message.edit_text(
-            "**🎯 Select streams to remove:**\n\n"
-            "⬜️ = Keep stream\n"
-            "☑️ = Remove stream",
-            reply_markup=InlineKeyboardMarkup(buttons)
+    try:
+        if not any(session.settings[op]['enabled'] for op in ['remove_streams', 'compression']):
+            await callback_query.answer("Please select at least one operation!", show_alert=True)
+            return
+        
+        # Start downloading using file_id
+        start_time = time.time()
+        await callback_query.message.edit_text("📥 **Downloading file...**")
+        
+        async def progress_wrapper(current, total):
+            await progress(current, total, callback_query.message, start_time, "Downloading")
+        
+        # Download using client.download_media instead
+        session.file_path = await client.download_media(
+            session.file_id,
+            progress=progress_wrapper
         )
-    elif session.settings['compression']['enabled']:
-        buttons = ButtonManager.create_compression_buttons(session.settings['compression'])
-        await callback_query.message.edit_text(
-            "**🔄 Compression Settings**\n\n"
-            "Configure your compression settings:",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-
+        
+        if not session.file_path:
+            raise Exception("Download failed")
+            
+        # Rest of your code...
+        
+    except Exception as e:
+        await callback_query.message.edit_text(f"❌ **Error:** {str(e)}")
+        if callback_query.from_user.id in user_data:
+            del user_data[callback_query.from_user.id]
 async def handle_stream_selection(callback_query: CallbackQuery, session: UserSession):
     """Handle stream selection"""
     stream_index = int(callback_query.data.split("_")[1])
