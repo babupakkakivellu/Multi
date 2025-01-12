@@ -227,9 +227,39 @@ def create_rename_buttons() -> list:
     ]
     return buttons
 
-async def process_video(input_file: str, streams_to_remove: Set[int], total_streams: int) -> str:
+async def process_progress(message, current, total, start_time):
+    if not hasattr(process_progress, 'timer'):
+        process_progress.timer = Timer()
+        process_progress.timer.start()
+
+    if not process_progress.timer.should_update() and current != total:
+        return
+
     try:
+        bar, percent = create_progress_bar(current, total)
+        elapsed_time = process_progress.timer.get_elapsed_time()
+        current_mb = format_size(current)
+        total_mb = format_size(total)
+        speed = format_size(current/(time.time()-start_time))
+
+        await message.edit_text(
+            f"⚙️ 𝗣𝗿𝗼𝗰𝗲𝘀𝘀𝗶𝗻𝗴...\n\n"
+            f"┌ **Progress:** {current_mb} / {total_mb}\n"
+            f"├ **Speed:** {speed}/s\n"
+            f"├ **Time:** {elapsed_time}\n"
+            f"└ {bar} {percent:.1f}%"
+        )
+    except Exception as e:
+        print(f"Progress update error: {str(e)}")
+
+# Modify the process_video function to include progress updates
+async def process_video(input_file: str, streams_to_remove: Set[int], total_streams: int, message) -> str:
+    try:
+        start_time = time.time()
         output_file = f"processed_{os.path.basename(input_file)}"
+        
+        # Get input file size for progress calculation
+        total_size = os.path.getsize(input_file)
         
         cmd = ['ffmpeg', '-i', input_file]
         
@@ -237,13 +267,43 @@ async def process_video(input_file: str, streams_to_remove: Set[int], total_stre
             if i not in streams_to_remove:
                 cmd.extend(['-map', f'0:{i}'])
         
-        cmd.extend(['-c', 'copy', output_file])
+        cmd.extend([
+            '-c', 'copy',
+            '-progress', 'pipe:1',  # Output progress to pipe
+            output_file
+        ])
         
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
+
+        # Initialize progress variables
+        current_size = 0
+        
+        while True:
+            if process.stdout is None:
+                break
+                
+            line = await process.stdout.readline()
+            if not line:
+                break
+                
+            line = line.decode('utf-8').strip()
+            
+            # Parse FFmpeg progress output
+            if line.startswith('out_time_ms='):
+                try:
+                    # Calculate approximate progress based on time
+                    time_ms = int(line.split('=')[1])
+                    current_size = min(total_size * (time_ms / (total_size * 8)), total_size)
+                    
+                    # Update progress bar
+                    await process_progress(message, current_size, total_size, start_time)
+                except:
+                    pass
+
         stdout, stderr = await process.communicate()
         
         if process.returncode != 0:
@@ -401,13 +461,20 @@ async def handle_callback(client, callback_query: CallbackQuery):
             
         elif data.startswith("upload_"):
             start_time = time.time()
-            status_msg = await callback_query.message.edit_text("🔄 **Processing video...**")
-            
+            status_msg = await callback_query.message.edit_text(
+                "⚙️ 𝗣𝗿𝗼𝗰𝗲𝘀𝘀𝗶𝗻𝗴...\n\n"
+                "┌ **Progress:** 0.00 B / 0.00 B\n"
+                "├ **Speed:** 0.00 B/s\n"
+                "├ **Time:** 0s\n"
+                "└ ─────────────────── 0.0%"
+            )
+    
             try:
                 output_file = await process_video(
                     user['file_path'],
                     user['selected_streams'],
-                    len(user['streams'])
+                    len(user['streams']),
+                    status_msg  # Pass the status message for progress updates
                 )
                 if os.path.exists(output_file):
                     # Extract thumbnail and metadata
