@@ -137,6 +137,36 @@ async def progress(current, total, message, start_time, action):
         )
     except Exception as e:
         print(f"Progress update error: {str(e)}")
+class ProgressHandler:
+    def __init__(self):
+        self.timer = Timer()
+        self.timer.start()
+
+    async def update_progress(self, message, current, total, start_time, action_text="Processing"):
+        if not self.timer.should_update() and current != total:
+            return
+
+        try:
+            bar, percent = create_progress_bar(current, total)
+            elapsed_time = self.timer.get_elapsed_time()
+            current_mb = format_size(current)
+            total_mb = format_size(total)
+            speed = format_size(current/(time.time()-start_time))
+
+            await message.edit_text(
+                f"⚙️ {action_text}...\n\n"
+                f"┌ **Progress:** {current_mb} / {total_mb}\n"
+                f"├ **Speed:** {speed}/s\n"
+                f"├ **Time:** {elapsed_time}\n"
+                f"└ {bar} {percent:.1f}%"
+            )
+        except Exception as e:
+            print(f"Progress update error: {str(e)}")
+
+def create_progress_callback(progress_handler, message, start_time, action_text):
+    async def callback(current, total):
+        await progress_handler.update_progress(message, current, total, start_time, action_text)
+    return callback
 
 async def extract_thumbnail(file_path):
     try:
@@ -455,9 +485,9 @@ async def process_video(input_file: str, streams_to_remove: Set[int], total_stre
     try:
         start_time = time.time()
         output_file = f"processed_{os.path.basename(input_file)}"
-        
-        # Get input file size for progress calculation
         total_size = os.path.getsize(input_file)
+        
+        progress_handler = ProgressHandler()
         
         cmd = ['ffmpeg', '-i', input_file]
         
@@ -467,7 +497,7 @@ async def process_video(input_file: str, streams_to_remove: Set[int], total_stre
         
         cmd.extend([
             '-c', 'copy',
-            '-progress', 'pipe:1',  # Output progress to pipe
+            '-progress', 'pipe:1',
             output_file
         ])
         
@@ -477,9 +507,6 @@ async def process_video(input_file: str, streams_to_remove: Set[int], total_stre
             stderr=asyncio.subprocess.PIPE
         )
 
-        # Initialize progress variables
-        current_size = 0
-        
         while True:
             if process.stdout is None:
                 break
@@ -490,15 +517,17 @@ async def process_video(input_file: str, streams_to_remove: Set[int], total_stre
                 
             line = line.decode('utf-8').strip()
             
-            # Parse FFmpeg progress output
             if line.startswith('out_time_ms='):
                 try:
-                    # Calculate approximate progress based on time
                     time_ms = int(line.split('=')[1])
                     current_size = min(total_size * (time_ms / (total_size * 8)), total_size)
-                    
-                    # Update progress bar
-                    await process_progress(message, current_size, total_size, start_time)
+                    await progress_handler.update_progress(
+                        message, 
+                        current_size, 
+                        total_size, 
+                        start_time,
+                        "Processing"
+                    )
                 except:
                     pass
 
@@ -713,6 +742,16 @@ async def handle_callback(client, callback_query: CallbackQuery):
                 f"⚙️ {'Compressing' if processing_type == 'compress' else 'Processing'} video...\n\n"
                 "┌ **Status:** Initializing\n"
                 "└ **Progress:** 0%"
+
+            progress_handler = ProgressHandler()
+            start_time = time.time()
+            
+            # Create progress callback for upload
+            upload_callback = create_progress_callback(
+                progress_handler,
+                status_msg,
+                start_time,
+                "Uploading"
             )
             
             try:
@@ -774,24 +813,24 @@ async def handle_callback(client, callback_query: CallbackQuery):
 
                 # Send the processed file
                 if data == "upload_video" or processing_type == 'compress':
-                    await client.send_video(
-                        callback_query.message.chat.id,
-                        output_file,
-                        caption=caption,
-                        duration=thumb_data['duration'] if thumb_data else None,
-                        width=thumb_data['width'] if thumb_data else None,
-                        height=thumb_data['height'] if thumb_data else None,
-                        thumb=thumb_data['thumb_path'] if thumb_data else None,
-                        progress=progress_wrapper
-                    )
-                else:
-                    await client.send_document(
-                        callback_query.message.chat.id,
-                        output_file,
-                        caption=caption,
-                        thumb=thumb_data['thumb_path'] if thumb_data else None,
-                        progress=progress_wrapper
-                    )
+                await client.send_video(
+                    callback_query.message.chat.id,
+                    output_file,
+                    caption=caption,
+                    duration=thumb_data['duration'] if thumb_data else None,
+                    width=thumb_data['width'] if thumb_data else None,
+                    height=thumb_data['height'] if thumb_data else None,
+                    thumb=thumb_data['thumb_path'] if thumb_data else None,
+                    progress=upload_callback
+                )
+            else:
+                await client.send_document(
+                    callback_query.message.chat.id,
+                    output_file,
+                    caption=caption,
+                    thumb=thumb_data['thumb_path'] if thumb_data else None,
+                    progress=upload_callback
+                )
 
                 await status_msg.edit_text(
                     f"✅ **{processing_type.replace('_', ' ').title()} completed successfully!**\n"
