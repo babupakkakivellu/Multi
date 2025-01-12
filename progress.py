@@ -1,48 +1,67 @@
 import time
 import asyncio
-from typing import Callable, Any
+from typing import Union
+from pyrogram.types import Message
 
 class ProgressHandler:
     def __init__(self):
         self._last_update_time = 0
         self._min_update_interval = 2  # seconds
 
-    async def __call__(self, current: int, total: int, 
-                      message_handler: Callable[[str], Any], 
-                      start_time: float,
-                      action: str = "Processing") -> None:
+    async def update_progress(
+        self,
+        current: int,
+        total: int,
+        message: Message,
+        start_time: float,
+        action_text: str = "Processing"  # Changed parameter name to match usage
+    ) -> None:
+        """
+        Update progress message with current status
+        
+        Args:
+            current (int): Current progress value
+            total (int): Total expected value
+            message (Message): Message object to edit
+            start_time (float): When the operation started
+            action_text (str, optional): Action text to display. Defaults to "Processing"
+        """
         try:
             current_time = time.time()
-            if (current_time - self._last_update_time >= self._min_update_interval) or (current == total):
-                self._last_update_time = current_time
+            should_update = (
+                (current_time - self._last_update_time >= self._min_update_interval) or 
+                (current == total)
+            )
+            
+            if not should_update:
+                return
                 
-                # Calculate progress
-                percent = (current * 100) / total if total > 0 else 0
-                bar = self._create_progress_bar(current, total)
-                speed = self._calculate_speed(current, start_time)
-                elapsed = self._format_time(int(current_time - start_time))
-                
-                # Format sizes
-                current_size = self._format_size(current)
-                total_size = self._format_size(total)
-                
-                # Create status message
-                status = (
-                    f"⚙️ {action}...\n\n"
-                    f"┌ **Progress:** {current_size} / {total_size}\n"
-                    f"├ **Speed:** {speed}/s\n"
-                    f"├ **Time:** {elapsed}\n"
-                    f"└ {bar} {percent:.1f}%"
-                )
-                
-                await message_handler(status)
-                
-                # Small delay to prevent excessive CPU usage
-                await asyncio.sleep(0.1)
-                
+            self._last_update_time = current_time
+            
+            # Calculate progress
+            percent = (current * 100) / total if total > 0 else 0
+            bar = self._create_progress_bar(current, total)
+            speed = self._calculate_speed(current, start_time)
+            elapsed = self._format_time(int(current_time - start_time))
+            
+            # Format sizes
+            current_size = self._format_size(current)
+            total_size = self._format_size(total)
+            
+            # Create status message
+            status = (
+                f"⚙️ {action_text}...\n\n"
+                f"┌ **Progress:** {current_size} / {total_size}\n"
+                f"├ **Speed:** {speed}/s\n"
+                f"├ **Time:** {elapsed}\n"
+                f"└ {bar} {percent:.1f}%"
+            )
+            
+            await message.edit_text(status)
+            
         except Exception as e:
             print(f"Progress update error: {str(e)}")
-
+            
     @staticmethod
     def _create_progress_bar(current: int, total: int) -> str:
         if total == 0:
