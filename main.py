@@ -163,6 +163,81 @@ class ProgressHandler:
         except Exception as e:
             print(f"Progress update error: {str(e)}")
 
+async def create_caption(original_size: int, processed_size: int, user: dict) -> str:
+    if user.get('new_filename'):
+        filename = user['new_filename']
+    else:
+        filename = os.path.basename(user['file_path'])
+
+    saved_space = original_size - processed_size
+    saved_percent = (saved_space / original_size) * 100 if original_size > 0 else 0
+
+    if user.get('processing_type') == 'compress':
+        settings = user['compression_settings']
+        caption = (
+            f"**{filename}**\n\n"
+            f"┌ **Codec:** {settings['video_format'].upper()}\n"
+            f"├ **Resolution:** {settings['resolution']}p\n"
+            f"├ **Preset:** {settings['preset']}\n"
+            f"├ **CRF:** {settings['crf']}\n"
+            f"├ **Original Size:** {format_size(original_size)}\n"
+            f"├ **Compressed Size:** {format_size(processed_size)}\n"
+            f"└ **Saved:** {format_size(saved_space)} ({saved_percent:.1f}%)"
+        )
+    else:
+        caption = (
+            f"**{filename}**\n\n"
+            f"┌ **Streams Removed:** {len(user['selected_streams'])}\n"
+            f"├ **Original Size:** {format_size(original_size)}\n"
+            f"├ **New Size:** {format_size(processed_size)}\n"
+            f"└ **Saved:** {format_size(saved_space)} ({saved_percent:.1f}%)"
+        )
+
+    return caption
+
+async def process_compression_settings(message, user):
+    """Process compression settings and display current configuration"""
+    settings = user['compression_settings']
+    
+    # Calculate estimated output size
+    input_size = os.path.getsize(user['file_path'])
+    size_multipliers = {
+        'hevc': 0.6,  # HEVC typically achieves better compression
+        'avc': 0.8,   # AVC is less efficient
+    }
+    resolution_multipliers = {
+        'source': 1.0,
+        '2160': 1.0,
+        '1440': 0.7,
+        '1080': 0.5,
+        '720': 0.3,
+        '480': 0.15
+    }
+    
+    codec_mult = size_multipliers.get(settings['video_format'], 0.8)
+    res_mult = resolution_multipliers.get(settings['resolution'], 1.0)
+    crf_mult = 1.0 + (23 - settings['crf']) * 0.05
+    
+    estimated_size = input_size * codec_mult * res_mult * crf_mult
+    
+    compression_info = (
+        "**🗜️ Compression Settings:**\n\n"
+        f"┌ **Video Codec:** {settings['video_format'].upper()}\n"
+        f"├ **Preset:** {settings['preset']}\n"
+        f"├ **Resolution:** {settings['resolution']}p\n"
+        f"├ **Pixel Format:** {settings['pixel_format']}\n"
+        f"├ **CRF Value:** {settings['crf']}\n"
+        f"├ **Input Size:** {format_size(input_size)}\n"
+        f"└ **Estimated Size:** {format_size(estimated_size)}\n\n"
+        "Select your options below:"
+    )
+    
+    buttons = create_compression_buttons(settings)
+    await message.edit_text(
+        compression_info,
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
 def create_progress_callback(progress_handler, message, start_time, action_text):
     async def callback(current, total):
         await progress_handler.update_progress(message, current, total, start_time, action_text)
@@ -734,14 +809,16 @@ async def handle_callback(client, callback_query: CallbackQuery):
             await process_compression_settings(callback_query.message, user)
 
         # Process Handlers (Both Compression and Stream Removal)
-        try:
-            if data == "continue" or data == "compress_process":
+        elif data == "continue" or data == "compress_process":
+            try:
                 start_time = time.time()
                 progress_handler = ProgressHandler()
             
                 status_msg = await callback_query.message.edit_text(
                     "⚙️ Initializing process..."
                 )
+                
+                processing_type = user.get('processing_type', 'unknown')
             
                 async def update_status(text: str):
                     try:
@@ -764,27 +841,22 @@ async def handle_callback(client, callback_query: CallbackQuery):
                             status_msg
                         )    
                 
-                # Get file metadata and prepare for upload
+                    # Get file metadata and prepare for upload
                     thumb_data = await extract_thumbnail(output_file)
                     original_size = os.path.getsize(user['file_path'])
                     processed_size = os.path.getsize(output_file)
                 
-                # Create upload progress handler
-                    upload_start_time = time.time()
+                    # Create upload progress handler
                     async def upload_progress(current, total):
-                        await progress_handler(
-                            current, total,
-                            update_status,
-                            upload_start_time,
-                            "Uploading"
-                        )
+                        await progress_handler(current, total, update_status, upload_start_time, "Uploading")
                 
-                # Send file with progress
+                    # Send file with progress
+                    caption = await create_caption(original_size, processed_size, user)
                     if data == "upload_video" or processing_type == 'compress':
                         await client.send_video(
                             callback_query.message.chat.id,
                             output_file,
-                            caption=create_caption(original_size, processed_size, user),
+                            caption=caption,
                             duration=thumb_data.get('duration'),
                             width=thumb_data.get('width'),
                             height=thumb_data.get('height'),
@@ -795,18 +867,18 @@ async def handle_callback(client, callback_query: CallbackQuery):
                         await client.send_document(
                             callback_query.message.chat.id,
                             output_file,
-                            caption=create_caption(original_size, processed_size, user),
+                            caption=caption,
                             thumb=thumb_data.get('thumb_path'),
                             progress=upload_progress
                         )
                 
-                # Success message
+                    # Success message
                     await status_msg.edit_text("✅ Process completed successfully!")
                 
                 except Exception as e:
                     await status_msg.edit_text(f"❌ Error: {str(e)}")
                 finally:
-                # Cleanup
+                    # Cleanup
                     cleanup_files = [output_file]
                     if thumb_data and thumb_data.get('thumb_path'):
                         cleanup_files.append(thumb_data['thumb_path'])
@@ -821,10 +893,10 @@ async def handle_callback(client, callback_query: CallbackQuery):
                     if user_id in user_data:
                         del user_data[user_id]
                     
-        except Exception as e:
-            await callback_query.message.edit_text(f"❌ Error: {str(e)}")
-            if user_id in user_data:
-                del user_data[user_id]
+            except Exception as e:
+                await callback_query.message.edit_text(f"❌ Error: {str(e)}")
+                if user_id in user_data:
+                    del user_data[user_id]
 
         # Rename Handlers
         elif data == "rename":
