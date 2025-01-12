@@ -656,11 +656,11 @@ async def handle_video(client, message: Message):
         async def download_progress(current: int, total: int):
             try:
                 await progress_handler.update_progress(
-                    message=status_msg,
                     current=current,
                     total=total,
+                    message=status_msg,
                     start_time=start_time,
-                    action="Downloading"
+                    action_text="Downloading"  # Changed from 'action' to 'action_text'
                 )
             except Exception as e:
                 print(f"Progress callback error: {str(e)}")
@@ -864,11 +864,11 @@ async def handle_callback(client, callback_query: CallbackQuery):
                     async def upload_progress(current: int, total: int):
                         try:
                             await progress_handler.update_progress(
-                                message=status_msg,
                                 current=current,
                                 total=total,
+                                message=status_msg,
                                 start_time=upload_start_time,
-                                action="Uploading"
+                                action_text="Uploading"  # Changed from 'action' to 'action_text'
                             )
                         except Exception as e:
                             print(f"Upload progress error: {str(e)}")
