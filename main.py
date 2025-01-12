@@ -646,22 +646,26 @@ async def handle_video(client, message: Message):
             'awaiting_rename': False,
             'new_filename': None,
             'compression_settings': DEFAULT_COMPRESSION_SETTINGS.copy(),
-            'mode': None  # 'compress' or 'remove_streams'
+            'mode': None
         }
         
-        # Create progress handler for download
+        # Initialize progress handler
         progress_handler = ProgressHandler()
         
-        async def download_progress(current, total):
-            await progress_handler(
-                current,
-                total,
-                lambda text: status_msg.edit_text(text),
-                start_time,
-                "Downloading"
-            )
+        # Create the progress callback function
+        async def download_progress(current: int, total: int):
+            try:
+                await progress_handler.update_progress(
+                    message=status_msg,
+                    current=current,
+                    total=total,
+                    start_time=start_time,
+                    action="Downloading"
+                )
+            except Exception as e:
+                print(f"Progress callback error: {str(e)}")
         
-        # Download video with progress handler
+        # Download video with progress
         file_path = await message.download(
             progress=download_progress
         )
@@ -857,8 +861,17 @@ async def handle_callback(client, callback_query: CallbackQuery):
                     processed_size = os.path.getsize(output_file)
                 
                     # Create upload progress handler
-                    async def upload_progress(current, total):
-                        await progress_handler(current, total, update_status, upload_start_time, "Uploading")
+                    async def upload_progress(current: int, total: int):
+                        try:
+                            await progress_handler.update_progress(
+                                message=status_msg,
+                                current=current,
+                                total=total,
+                                start_time=upload_start_time,
+                                action="Uploading"
+                            )
+                        except Exception as e:
+                            print(f"Upload progress error: {str(e)}")
                 
                     # Send file with progress
                     caption = await create_caption(original_size, processed_size, user)
