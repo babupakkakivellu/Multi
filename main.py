@@ -1,269 +1,204 @@
-# Part 1: Core Setup and Basic Classes
-
-from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+# Part 1: Imports and Global Variables
+import asyncio
 import os
 import json
-import asyncio
-import subprocess
+import re
 import time
-from typing import Dict, Set, Tuple
-import math
+from datetime import timedelta
+from typing import Set
+from pyrogram.types import CallbackQuery
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
-# Bot configuration
-app = Client(
-    "stream_remover_bot",
-    api_id="16501053",
-    api_hash="d8c9b01c863dabacc484c2c06cdd0f6e",
-    bot_token="6738287955:AAE5lXdu_kbQevdyImUIJ84CTwwNhELjHK4"
-)
+# Replace with your bot token and username
+API_ID = 16501053
+API_HASH = "d8c9b01c863dabacc484c2c06cdd0f6e"
+BOT_TOKEN = "6738287955:AAE5lXdu_kbQevdyImUIJ84CTwwNhELjHK4"
+BOT_USERNAME = "YOUR_BOT_USERNAME"
 
-class UserSession:
-    def __init__(self):
-        self.file_path = None
-        self.file_id = None
-        self.streams = None
-        self.last_activity = time.time()
-        self.status_message = None
-        self.settings = {
-            'remove_streams': {
-                'enabled': False,
-                'selected_streams': set()
-            },
-            'compression': {
-                'enabled': False,
-                'resolution': None,
-                'crf': 23,
-                'preset': 'medium'
-            },
-            'new_filename': None,
-            'awaiting_rename': False
-        }
+app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Store user sessions
-user_data: Dict[int, UserSession] = {}
+user_data = {}
 
-async def progress(current: int, total: int, message: Message, start_time: float, action: str):
-    """Display progress for file operations"""
-    if total == 0:
-        return
-        
-    try:
-        elapsed_time = time.time() - start_time
-        percentage = (current * 100) / total
-        speed = current / elapsed_time if elapsed_time > 0 else 0
-        
-        # Create progress bar
-        bar_length = 20
-        filled_length = int(bar_length * current // total)
-        bar = "█" * filled_length + "▒" * (bar_length - filled_length)
-        
-        # Format sizes
-        current_size = format_size(current)
-        total_size = format_size(total)
-        speed_text = format_size(speed)
-        
-        await message.edit_text(
-            f"{get_action_emoji(action)} **{action}**\n\n"
-            f"┌ **Size:** {current_size} / {total_size}\n"
-            f"├ **Speed:** {speed_text}/s\n"
-            f"├ **Progress:** {percentage:.1f}%\n"
-            f"└ {bar}"
-        )
-    except Exception as e:
-        print(f"Progress update error: {str(e)}")
+# Part 2: Settings, Constants and Helper Functions
 
-def get_action_emoji(action: str) -> str:
-    """Get emoji for different actions"""
-    return {
-        "Downloading": "📥",
-        "Uploading": "📤",
-        "Processing": "⚙️",
-        "Compressing": "🔄"
-    }.get(action, "📝")
+# Compression Settings
+COMPRESSION_SETTINGS = {
+    'presets': ['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow'],
+    'pixel_formats': [
+        ('yuv420p', '8-bit Compatible'),
+        ('yuv420p10le', '10-bit Standard'),
+        ('yuv444p10le', '10-bit High Quality')
+    ],
+    'crf_range': range(15, 31)
+}
 
-def format_size(size: float) -> str:
-    """Format size in bytes to human readable format"""
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-        if size < 1024:
-            return f"{size:.2f} {unit}"
-        size /= 1024
-    return f"{size:.2f} TB"
+# Default Settings
+DEFAULT_SETTINGS = {
+    'preset': 'medium',
+    'pixel_format': 'yuv420p10le',
+    'crf': 23,
+    'copy_audio': True,
+    'copy_subs': True
+}
 
-def format_time(seconds: float) -> str:
-    """Format seconds to human readable time"""
+# Help Message
+HELP_TEXT = """
+**🎥 Video Processing Bot**
+
+Send me any video file to:
+• 🎯 Compress with HEVC (x265)
+• ✂️ Remove unwanted streams
+• 📊 Adjust quality (CRF 15-30)
+• 🎨 Choose pixel format
+
+**Features:**
+• HEVC (x265) encoding
+• 10-bit support
+• Multiple presets
+• Stream selection
+• Progress tracking
+
+**Commands:**
+/start - Start the bot
+/help - Show this help
+/cancel - Cancel current process
+
+ℹ️ Supported formats: MP4, MKV, AVI, etc.
+"""
+
+def format_time(seconds):
     if seconds < 60:
-        return f"{seconds:.0f}s"
+        return f"{seconds:.1f}s"
     elif seconds < 3600:
         minutes = seconds // 60
         seconds = seconds % 60
-        return f"{minutes:.0f}m {seconds:.0f}s"
+        return f"{minutes}m {seconds:.1f}s"
     else:
         hours = seconds // 3600
         minutes = (seconds % 3600) // 60
         seconds = seconds % 60
-        return f"{hours:.0f}h {minutes:.0f}m {seconds:.0f}s"
+        return f"{hours}h {minutes}m {seconds:.1f}s"
 
-class FileManager:
-    @staticmethod
-    async def cleanup_files(file_paths: list):
-        """Clean up temporary files"""
-        for path in file_paths:
-            try:
-                if path and os.path.exists(path):
-                    os.remove(path)
-            except Exception as e:
-                print(f"Cleanup error: {str(e)}")
+def format_size(size):
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size < 1024:
+            return f"{size:.2f} {unit}"
+        size /= 1024
 
-    @staticmethod
-    def get_safe_filename(filename: str) -> str:
-        """Convert filename to safe version"""
-        return "".join([c for c in filename if c.isalpha() or c.isdigit() or c in (' ', '-', '_')]).rstrip()
+def create_progress_bar(current, total, length=20):
+    filled = int(length * current // total)
+    bar = "█" * filled + "░" * (length - filled)
+    percent = current * 100 / total
+    return bar, percent
 
-    # Part 2: Video Processing and Stream Handling
+class FFmpegProgress:
+    def __init__(self, message):
+        self.message = message
+        self.start_time = time.time()
+        self.last_update_time = 0
+        self.update_interval = 2
 
-class VideoProcessor:
-    def __init__(self):
-        self.supported_formats = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv'}
+    async def update_progress(self, current, total, operation):
+        now = time.time()
+        if now - self.last_update_time < self.update_interval and current != total:
+            return
 
-    async def process_video(self, input_file: str, session: UserSession, message: Message) -> str:
+        self.last_update_time = now
+        elapsed_time = int(now - self.start_time)
+        speed = current / elapsed_time if elapsed_time > 0 else 0
+        eta = int((total - current) / speed) if speed > 0 else 0
+
+        bar, percent = create_progress_bar(current, total)
+        
         try:
-            output_file = f"processed_{os.path.basename(input_file)}"
-            start_time = time.time()
-            
-            # Get video duration for progress tracking
-            total_duration = await self.get_video_duration(input_file)
-            
-            # Build FFmpeg command
-            cmd = ['ffmpeg', '-i', input_file]
-            
-            # Add stream mapping if streams are selected for removal
-            if session.settings['remove_streams']['enabled']:
-                for i in range(len(session.streams)):
-                    if i not in session.settings['remove_streams']['selected_streams']:
-                        cmd.extend(['-map', f'0:{i}'])
-            else:
-                cmd.extend(['-map', '0'])
-            
-            # Add compression settings if enabled
-            if session.settings['compression']['enabled']:
-                settings = session.settings['compression']
-                # Video codec settings
-                cmd.extend(['-c:v', 'libx264'])
-                
-                # Resolution
-                if settings['resolution'] and settings['resolution'] != 'original':
-                    height = int(settings['resolution'].replace('p', ''))
-                    cmd.extend(['-vf', f'scale=-2:{height}'])
-                
-                # Quality and speed
-                cmd.extend([
-                    '-crf', str(settings['crf']),
-                    '-preset', settings['preset'],
-                    '-c:a', 'aac',
-                    '-b:a', '192k'
-                ])
-            else:
-                cmd.extend(['-c', 'copy'])
-            
-            # Add progress monitoring and output file
-            cmd.extend(['-progress', 'pipe:1', '-y', output_file])
-            
-            # Start FFmpeg process
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+            await self.message.edit_text(
+                f"{operation}\n\n"
+                f"╭─❰ 𝙿𝚛𝚘𝚐𝚛𝚎𝚜𝚜 ❱\n"
+                f"│\n"
+                f"├ {bar}\n"
+                f"├ **Progress:** `{percent:.1f}%`\n"
+                f"├ **Speed:** `{format_size(speed)}/s`\n"
+                f"├ **Processed:** `{format_size(current)}`\n"
+                f"├ **Total:** `{format_size(total)}`\n"
+                f"├ **Time:** `{format_time(elapsed_time)}`\n"
+                f"├ **ETA:** `{format_time(eta)}`\n"
+                f"│\n"
+                f"╰─❰ @{BOT_USERNAME} ❱"
             )
-            
-            # Monitor progress
-            await self.monitor_progress(process, total_duration, message, start_time)
-            
-            # Wait for process to complete
-            stdout, stderr = await process.communicate()
-            
-            if process.returncode != 0:
-                error_message = stderr.decode() if stderr else "Unknown error"
-                raise Exception(f"FFmpeg processing failed: {error_message}")
-            
-            if not os.path.exists(output_file):
-                raise Exception("Output file was not created")
-                
-            return output_file
-            
         except Exception as e:
-            raise Exception(f"Processing failed: {str(e)}")
+            print(f"Progress update error: {str(e)}")
 
-    async def monitor_progress(self, process, total_duration, message, start_time):
-        """Monitor FFmpeg progress and update status message"""
-        last_update_time = 0
-        try:
-            while True:
-                line = await process.stdout.readline()
-                if not line:
-                    break
-                    
-                line = line.decode('utf-8')
-                if "out_time_ms=" in line:
-                    time_ms = int(line.split("out_time_ms=")[1].split()[0])
-                    current_time = time_ms / 1000000  # Convert to seconds
-                    
-                    # Update progress every 2 seconds
-                    current_time_stamp = time.time()
-                    if current_time_stamp - last_update_time >= 2:
-                        progress_text = (
-                            f"⚙️ **Processing Video**\n\n"
-                            f"┌ **Progress:** {format_time(current_time)} / {format_time(total_duration)}\n"
-                            f"├ **Speed:** {format_size(current_time/(current_time_stamp-start_time))}/s\n"
-                            f"└ **Elapsed:** {format_time(current_time_stamp-start_time)}"
-                        )
-                        await message.edit_text(progress_text)
-                        last_update_time = current_time_stamp
-                        
-        except Exception as e:
-            print(f"Progress monitoring error: {str(e)}")
+def create_main_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎯 Compress Video", callback_data="compress_start")],
+        [InlineKeyboardButton("✂️ Remove Streams", callback_data="remove_streams")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+    ])
 
-    @staticmethod
-    async def get_video_info(file_path: str) -> dict:
-        """Get video file information using ffprobe"""
-        try:
-            probe = await asyncio.create_subprocess_exec(
-                'ffprobe',
-                '-v', 'quiet',
-                '-print_format', 'json',
-                '-show_format',
-                '-show_streams',
-                file_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, _ = await probe.communicate()
-            return json.loads(stdout)
-        except Exception as e:
-            raise Exception(f"Failed to get video info: {str(e)}")
+def create_settings_menu(settings):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚙️ Encoding Preset", callback_data="show_preset")],
+        [InlineKeyboardButton("📊 CRF Value", callback_data="show_crf")],
+        [InlineKeyboardButton("🎨 Pixel Format", callback_data="show_pixfmt")],
+        [InlineKeyboardButton(f"🔊 Audio: {'Copy' if settings['copy_audio'] else 'Re-encode'}", 
+                            callback_data="toggle_audio")],
+        [InlineKeyboardButton(f"💬 Subtitles: {'Copy' if settings['copy_subs'] else 'Remove'}", 
+                            callback_data="toggle_subs")],
+        [InlineKeyboardButton("✅ Start Process", callback_data="start_compress")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+    ])
 
-    @staticmethod
-    async def get_video_duration(file_path: str) -> float:
-        """Get video duration in seconds"""
-        try:
-            probe = await asyncio.create_subprocess_exec(
-                'ffprobe',
-                '-v', 'error',
-                '-show_entries', 'format=duration',
-                '-of', 'default=noprint_wrappers=1:nokey=1',
-                file_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, _ = await probe.communicate()
-            return float(stdout.decode().strip())
-        except Exception as e:
-            raise Exception(f"Failed to get video duration: {str(e)}")
+def create_final_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Rename File", callback_data="rename_file")],
+        [InlineKeyboardButton("📹 Send as Video", callback_data="upload_video"),
+         InlineKeyboardButton("📄 Send as Document", callback_data="upload_document")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+    ])
 
-async def extract_thumbnail(file_path: str) -> dict:
-    """Extract thumbnail and get video metadata"""
+async def progress(current, total, message, start_time, action):
+    if not hasattr(progress, 'last_update_time'):
+        progress.last_update_time = 0
+
+    now = time.time()
+    if now - progress.last_update_time < 2:
+        return
+
+    progress.last_update_time = now
+    elapsed_time = int(now - start_time)
+    speed = current / elapsed_time if elapsed_time > 0 else 0
+    eta = int((total - current) / speed) if speed > 0 else 0
+
+    bar, percent = create_progress_bar(current, total)
+    
+    status = "📥 Downloading..." if action == "download" else "📤 Uploading..."
+    
     try:
-        # Get video information
+        await message.edit_text(
+            f"{status}\n\n"
+            f"╭─❰ 𝙿𝚛𝚘𝚐𝚛𝚎𝚜𝚜 ❱\n"
+            f"│\n"
+            f"├ {bar}\n"
+            f"├ **Progress:** `{percent:.1f}%`\n"
+            f"├ **Speed:** `{format_size(speed)}/s`\n"
+            f"├ **Processed:** `{format_size(current)}`\n"
+            f"├ **Total:** `{format_size(total)}`\n"
+            f"├ **Time:** `{format_time(elapsed_time)}`\n"
+            f"├ **ETA:** `{format_time(eta)}`\n"
+            f"│\n"
+            f"╰─❰ @{BOT_USERNAME} ❱"
+        )
+    except Exception as e:
+        print(f"Progress update error: {str(e)}")
+
+
+# Part 3: Video Processing and FFmpeg Handlers
+
+async def extract_thumbnail(file_path):
+    try:
         probe = await asyncio.create_subprocess_exec(
             'ffprobe', '-v', 'quiet',
             '-print_format', 'json',
@@ -276,13 +211,16 @@ async def extract_thumbnail(file_path: str) -> dict:
         stdout, _ = await probe.communicate()
         metadata = json.loads(stdout)
         
-        # Get video duration and dimensions
-        duration = int(float(metadata['format']['duration']))
+        format_info = metadata.get('format', {})
         video_stream = next((s for s in metadata['streams'] if s['codec_type'] == 'video'), None)
-        width = int(video_stream['width']) if video_stream else 0
-        height = int(video_stream['height']) if video_stream else 0
         
-        # Generate thumbnail
+        if not video_stream:
+            raise Exception("No video stream found")
+            
+        duration = float(format_info.get('duration', 0))
+        width = int(video_stream.get('width', 0))
+        height = int(video_stream.get('height', 0))
+        
         thumbnail_path = f"thumb_{os.path.splitext(os.path.basename(file_path))[0]}.jpg"
         cmd = [
             'ffmpeg', '-ss', str(duration//2),
@@ -298,778 +236,854 @@ async def extract_thumbnail(file_path: str) -> dict:
         )
         await process.communicate()
         
+        if not os.path.exists(thumbnail_path):
+            raise Exception("Failed to generate thumbnail")
+        
         return {
-            'thumb_path': thumbnail_path if os.path.exists(thumbnail_path) else None,
+            'thumb_path': thumbnail_path,
             'duration': duration,
             'width': width,
-            'height': height
+            'height': height,
+            'format': format_info.get('format_name', ''),
+            'size': int(format_info.get('size', 0))
         }
     except Exception as e:
         print(f"Thumbnail extraction error: {str(e)}")
         return None
 
-class StreamAnalyzer:
-    @staticmethod
-    def get_stream_info(stream: dict) -> str:
-        """Format stream information with improved readability"""
-        codec_type = stream.get('codec_type', 'unknown').upper()
-        codec_name = stream.get('codec_name', 'unknown').upper()
-        language = stream.get('tags', {}).get('language', 'und')
-        title = stream.get('tags', {}).get('title', '')
+async def run_ffmpeg_with_progress(command, message, input_file):
+    try:
+        # Get video duration
+        duration_cmd = [
+            'ffprobe', 
+            '-v', 'error', 
+            '-show_entries', 'format=duration', 
+            '-of', 'default=noprint_wrappers=1:nokey=1', 
+            input_file
+        ]
         
-        info_parts = [f"{codec_type} ({codec_name})"]
+        process = await asyncio.create_subprocess_exec(
+            *duration_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await process.communicate()
+        total_duration = float(stdout.decode().strip())
+
+        # Start FFmpeg process
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        time_pattern = re.compile(r"time=(\d{2}):(\d{2}):(\d{2})\.\d+")
+        speed_pattern = re.compile(r"speed=(\d+\.\d+)x")
+        fps_pattern = re.compile(r"fps=\s*(\d+)")
         
-        if language != 'und':
-            info_parts.append(f"[{language.upper()}]")
-        
-        if codec_type == 'VIDEO':
-            width = stream.get('width', '?')
-            height = stream.get('height', '?')
-            fps = stream.get('r_frame_rate', '').split('/')[0]
-            info_parts.append(f"{width}x{height}")
-            if fps:
-                info_parts.append(f"{fps}fps")
+        last_update_time = 0
+        update_interval = 2
+
+        while True:
+            if process.stderr:
+                line = await process.stderr.readline()
+                if not line:
+                    break
                 
-        elif codec_type == 'AUDIO':
-            channels = stream.get('channels', '?')
-            info_parts.append(f"{channels}ch")
-            
-        if title:
-            info_parts.append(f"'{title}'")
-            
-        return " | ".join(info_parts)
+                line = line.decode('utf-8')
+                time_matches = time_pattern.search(line)
+                speed_matches = speed_pattern.search(line)
+                fps_matches = fps_pattern.search(line)
+                
+                if time_matches:
+                    current_time = time.time()
+                    if current_time - last_update_time >= update_interval:
+                        last_update_time = current_time
+                        
+                        hours, minutes, seconds = map(int, time_matches.groups())
+                        current_time = hours * 3600 + minutes * 60 + seconds
+                        speed = float(speed_matches.group(1)) if speed_matches else 0
+                        fps = fps_matches.group(1) if fps_matches else "0"
+                        
+                        progress = current_time / total_duration
+                        bar_length = 20
+                        filled_length = int(bar_length * progress)
+                        bar = '█' * filled_length + '░' * (bar_length - filled_length)
+                        
+                        eta = (total_duration - current_time) / speed if speed > 0 else 0
+                        
+                        await message.edit_text(
+                            f"🔄 **Processing Video...**\n\n"
+                            f"╭─❰ 𝙿𝚛𝚘𝚐𝚛𝚎𝚜𝚜 ❱\n"
+                            f"│\n"
+                            f"├ {bar}\n"
+                            f"├ **Progress:** `{progress*100:.1f}%`\n"
+                            f"├ **Speed:** `{speed:.1f}x`\n"
+                            f"├ **FPS:** `{fps}`\n"
+                            f"├ **Time:** `{format_time(current_time)} / {format_time(total_duration)}`\n"
+                            f"├ **ETA:** `{format_time(eta)}`\n"
+                            f"│\n"
+                            f"╰─❰ @{BOT_USERNAME} ❱"
+                        )
 
-    @staticmethod
-    def get_streams_summary(streams: list) -> str:
-        """Create a summary of all streams"""
-        summary = []
-        for i, stream in enumerate(streams):
-            summary.append(f"{i}: {StreamAnalyzer.get_stream_info(stream)}")
-        return "\n".join(summary)
+        await process.wait()
+        return process.returncode == 0
 
-# Part 3: UI Components and Button Managers
+    except Exception as e:
+        print(f"FFmpeg progress error: {str(e)}")
+        return False
 
-class ButtonManager:
-    @staticmethod
-    def create_initial_options(session: UserSession = None) -> list:
-        """Create initial operation selection buttons"""
-        remove_status = "✅" if session and session.settings['remove_streams']['enabled'] else "⬜️"
-        compress_status = "✅" if session and session.settings['compression']['enabled'] else "⬜️"
-        
-        buttons = [
-            [InlineKeyboardButton(
-                f"🗑️ Remove Streams {remove_status}",
-                callback_data="toggle_remove_streams"
-            )],
-            [InlineKeyboardButton(
-                f"🔄 Compress Video {compress_status}",
-                callback_data="toggle_compress"
-            )],
-            [
-                InlineKeyboardButton("✅ Continue", callback_data="continue"),
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel")
-            ]
+async def get_video_info(file_path: str) -> dict:
+    try:
+        cmd = [
+            'ffprobe',
+            '-v', 'quiet',
+            '-print_format', 'json',
+            '-show_format',
+            '-show_streams',
+            file_path
         ]
-        return buttons
-
-    @staticmethod
-    def create_stream_buttons(streams: list, selected_streams: Set[int]) -> list:
-        """Create stream selection buttons with improved formatting"""
-        buttons = []
         
-        stream_groups = {
-            'video': ('🎥 VIDEO STREAMS', []),
-            'audio': ('🔊 AUDIO STREAMS', []),
-            'subtitle': ('💭 SUBTITLE STREAMS', []),
-            'other': ('📎 OTHER STREAMS', [])
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            raise Exception(f"FFprobe error: {stderr.decode()}")
+            
+        info = json.loads(stdout.decode())
+        return format_video_info(info)
+    except Exception as e:
+        raise Exception(f"Failed to get video info: {str(e)}")
+
+def format_video_info(info: dict) -> dict:
+    streams = info.get('streams', [])
+    format_info = info.get('format', {})
+    
+    video_stream = next((s for s in streams if s['codec_type'] == 'video'), None)
+    audio_streams = [s for s in streams if s['codec_type'] == 'audio']
+    subtitle_streams = [s for s in streams if s['codec_type'] == 'subtitle']
+    
+    formatted_info = {
+        'duration': float(format_info.get('duration', 0)),
+        'size': int(format_info.get('size', 0)),
+        'format': format_info.get('format_name', ''),
+        'streams': {
+            'video': [],
+            'audio': [],
+            'subtitle': []
         }
+    }
+    
+    if video_stream:
+        formatted_info['streams']['video'].append({
+            'codec': video_stream.get('codec_name', '').upper(),
+            'width': video_stream.get('width', 0),
+            'height': video_stream.get('height', 0),
+            'fps': eval(video_stream.get('r_frame_rate', '0/1')),
+            'bitrate': int(video_stream.get('bit_rate', 0))
+        })
+    
+    for audio in audio_streams:
+        formatted_info['streams']['audio'].append({
+            'codec': audio.get('codec_name', '').upper(),
+            'channels': audio.get('channels', 0),
+            'language': audio.get('tags', {}).get('language', 'und'),
+            'title': audio.get('tags', {}).get('title', '')
+        })
+    
+    for sub in subtitle_streams:
+        formatted_info['streams']['subtitle'].append({
+            'codec': sub.get('codec_name', '').upper(),
+            'language': sub.get('tags', {}).get('language', 'und'),
+            'title': sub.get('tags', {}).get('title', '')
+        })
+    
+    return formatted_info
+
+async def process_video(input_file: str, streams_to_remove: Set[int], total_streams: int) -> str:
+    try:
+        output_file = f"processed_{os.path.basename(input_file)}"
         
-        for i, stream in enumerate(streams):
-            codec_type = stream.get('codec_type', 'unknown').lower()
-            stream_info = StreamAnalyzer.get_stream_info(stream)
+        cmd = ['ffmpeg', '-i', input_file]
+        
+        for i in range(total_streams):
+            if i not in streams_to_remove:
+                cmd.extend(['-map', f'0:{i}'])
+        
+        cmd.extend(['-c', 'copy', output_file])
+        
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            error_message = stderr.decode() if stderr else "Unknown error"
+            raise Exception(f"FFmpeg error: {error_message}")
+        
+        if not os.path.exists(output_file):
+            raise Exception("Output file was not created")
             
-            group = codec_type if codec_type in stream_groups else 'other'
-            prefix = "☑️" if i in selected_streams else "⬜️"
-            
-            stream_groups[group][1].append({
-                'index': i,
-                'info': stream_info,
-                'prefix': prefix
-            })
+        return output_file
         
-        # Add headers and stream buttons for each group
-        for group_name, (header, group_streams) in stream_groups.items():
-            if group_streams:
-                buttons.append([InlineKeyboardButton(
-                    f"═══ {header} ═══",
-                    callback_data="header"
-                )])
-                for stream in group_streams:
-                    buttons.append([InlineKeyboardButton(
-                        f"{stream['prefix']} {stream['info']}",
-                        callback_data=f"stream_{stream['index']}"
-                    )])
-        
-        buttons.append([
-            InlineKeyboardButton("✅ Continue", callback_data="continue"),
-            InlineKeyboardButton("❌ Cancel", callback_data="cancel")
-        ])
-        
-        return buttons
+    except Exception as e:
+        raise Exception(f"Processing failed: {str(e)}")
 
-    @staticmethod
-    def create_compression_buttons(settings: dict = None) -> list:
-        """Create compression settings buttons with visual indicators"""
-        if not settings:
-            settings = {
-                'resolution': None,
-                'crf': 23,
-                'preset': 'medium'
-            }
-        
-        def get_status(key, value, current_value):
-            return "✅" if value == current_value else "⬜️"
-        
-        buttons = [
-            [InlineKeyboardButton("🎯 Resolution Settings", callback_data="comp_resolution_header")],
-            [
-                InlineKeyboardButton(
-                    f"720p {get_status('resolution', '720p', settings['resolution'])}",
-                    callback_data="res_720"
-                ),
-                InlineKeyboardButton(
-                    f"1080p {get_status('resolution', '1080p', settings['resolution'])}",
-                    callback_data="res_1080"
-                ),
-                InlineKeyboardButton(
-                    f"Original {get_status('resolution', None, settings['resolution'])}",
-                    callback_data="res_original"
-                )
-            ],
-            [InlineKeyboardButton("⚙️ Quality Settings", callback_data="comp_quality_header")],
-            [
-                InlineKeyboardButton(
-                    f"High {get_status('crf', 18, settings['crf'])}",
-                    callback_data="crf_18"
-                ),
-                InlineKeyboardButton(
-                    f"Medium {get_status('crf', 23, settings['crf'])}",
-                    callback_data="crf_23"
-                ),
-                InlineKeyboardButton(
-                    f"Low {get_status('crf', 28, settings['crf'])}",
-                    callback_data="crf_28"
-                )
-            ],
-            [InlineKeyboardButton("⚡ Speed Settings", callback_data="comp_speed_header")],
-            [
-                InlineKeyboardButton(
-                    f"Fast {get_status('preset', 'fast', settings['preset'])}",
-                    callback_data="preset_fast"
-                ),
-                InlineKeyboardButton(
-                    f"Medium {get_status('preset', 'medium', settings['preset'])}",
-                    callback_data="preset_medium"
-                ),
-                InlineKeyboardButton(
-                    f"Slow {get_status('preset', 'slow', settings['preset'])}",
-                    callback_data="preset_slow"
-                )
-            ],
-            [
-                InlineKeyboardButton("✅ Continue", callback_data="comp_continue"),
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel")
-            ]
-        ]
-        return buttons
 
-    @staticmethod
-    def create_rename_buttons() -> list:
-        """Create rename and upload format selection buttons"""
-        buttons = [
-            [InlineKeyboardButton("✏️ Rename File", callback_data="rename")],
-            [
-                InlineKeyboardButton("📹 Send as Video", callback_data="upload_video"),
-                InlineKeyboardButton("📄 Send as File", callback_data="upload_document")
-            ],
-            [InlineKeyboardButton("⬅️ Back", callback_data="back_to_settings")]
-        ]
-        return buttons
-
-class MessageFormatter:
-    @staticmethod
-    def get_start_message() -> str:
-        return (
-            "**🎥 Advanced Video Processor**\n\n"
-            "Send me any video file to:\n"
-            "• 🗑️ Remove unwanted streams\n"
-            "• 🔄 Compress with custom settings\n"
-            "• ✏️ Rename file (optional)\n"
-            "• 📤 Choose upload format\n\n"
-            "ℹ️ Supported formats: MP4, MKV, AVI, etc."
-        )
-
-    @staticmethod
-    def get_help_message() -> str:
-        return (
-            "**📚 Help**\n\n"
-            "1. Send any video file\n"
-            "2. Choose operations:\n"
-            "   • Remove unwanted streams\n"
-            "   • Compress video\n"
-            "3. Configure settings\n"
-            "4. Rename file (optional)\n"
-            "5. Choose upload format\n\n"
-            "**Commands:**\n"
-            "/start - Start the bot\n"
-            "/cancel - Cancel current operation"
-        )
-
-    @staticmethod
-    def get_about_message() -> str:
-        return (
-            "**ℹ️ About**\n\n"
-            "Advanced Video Processor Bot\n"
-            "Version: 2.0\n\n"
-            "Features:\n"
-            "• Stream removal\n"
-            "• Video compression\n"
-            "• Custom quality settings\n"
-            "• Progress tracking\n"
-            "• Multiple operations\n\n"
-            "Made with ❤️ by Your Name"
-        )
-
-    @staticmethod
-    def get_settings_summary(session: UserSession) -> str:
-        """Create a formatted summary of current settings"""
-        summary = ["**Current Settings:**\n"]
-        
-        if session.settings['remove_streams']['enabled']:
-            count = len(session.settings['remove_streams']['selected_streams'])
-            summary.append(f"🗑️ Stream Removal: {count} stream(s) selected")
-        
-        if session.settings['compression']['enabled']:
-            comp = session.settings['compression']
-            summary.extend([
-                "🔄 Compression:",
-                f"   • Resolution: {comp['resolution'] or 'Original'}",
-                f"   • Quality: {MessageFormatter.get_quality_text(comp['crf'])}",
-                f"   • Speed: {comp['preset'].title()}"
-            ])
-            
-        return "\n".join(summary)
-
-    @staticmethod
-    def get_quality_text(crf: int) -> str:
-        quality_map = {
-            18: "High ⭐⭐⭐",
-            23: "Medium ⭐⭐",
-            28: "Low ⭐"
-        }
-        return quality_map.get(crf, "Custom")
-
-    @staticmethod
-    def get_processing_message() -> str:
-        return "⚙️ **Processing your video...**"
-
-    @staticmethod
-    def get_rename_instructions() -> str:
-        return (
-            "**✏️ Please send the new filename:**\n\n"
-            "• Send the new name without extension\n"
-            "• Click /cancel to cancel renaming"
-        )
-
-# Part 4: Message Handlers and Basic Bot Logic
+# Part 4: Message and Command Handlers
 
 @app.on_message(filters.command("start"))
 async def start_command(client, message: Message):
-    """Handle /start command"""
-    buttons = [
-        [
-            InlineKeyboardButton("📚 Help", callback_data="show_help"),
-            InlineKeyboardButton("ℹ️ About", callback_data="show_about")
-        ]
-    ]
-    
     await message.reply_text(
-        MessageFormatter.get_start_message(),
-        reply_markup=InlineKeyboardMarkup(buttons)
+        "**🎥 Welcome to Video Processing Bot!**\n\n"
+        "Send me any video file to:\n"
+        "• 🎯 Compress with HEVC (x265)\n"
+        "• ✂️ Remove unwanted streams\n"
+        "• 📊 Adjust quality (CRF 15-30)\n"
+        "• 🎨 Choose pixel format\n\n"
+        "**Features:**\n"
+        "• Advanced compression\n"
+        "• 10-bit support\n"
+        "• Multiple presets\n"
+        "• Stream selection\n"
+        "• Progress tracking\n\n"
+        "ℹ️ Send any video to start processing!",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💡 Help", callback_data="show_help")],
+            [InlineKeyboardButton("👨‍💻 Developer", url="https://t.me/YourUsername")]
+        ])
     )
 
-@app.on_message(filters.command("cancel"))
-async def cancel_command(client, message: Message):
-    """Handle /cancel command"""
-    user_id = message.from_user.id
-    if user_id in user_data:
-        session = user_data[user_id]
-        if session.file_path and os.path.exists(session.file_path):
-            os.remove(session.file_path)
-        del user_data[user_id]
-        await message.reply_text("❌ Operation cancelled.")
-    else:
-        await message.reply_text("No active operation to cancel.")
+@app.on_message(filters.command("help"))
+async def help_command(client, message: Message):
+    await message.reply_text(HELP_TEXT)
 
 @app.on_message(filters.video | filters.document)
 async def handle_video(client, message: Message):
-    """Handle incoming video/document messages"""
     try:
         user_id = message.from_user.id
         
-        # Check if user has ongoing process
-        if user_id in user_data:
-            await message.reply_text(
-                "⚠️ You have an ongoing process. Please wait or use /cancel."
-            )
-            return
-        
-        # Validate file
-        if message.video:
-            file_info = message.video
-        elif message.document:
-            if not message.document.mime_type or not message.document.mime_type.startswith('video/'):
-                await message.reply_text("❌ Please send a valid video file.")
-                return
-            file_info = message.document
-        else:
-            await message.reply_text("❌ Please send a valid video file.")
-            return
-            
-        # Check file size
-        if file_info.file_size > 2 * 1024 * 1024 * 1024:  # 2GB limit
-            await message.reply_text("❌ File size too large (max 2GB)")
-            return
-            
-        # Initialize status message
+        # Send initial processing message
         status_msg = await message.reply_text(
-            "⚡ **Initializing...**\n\n"
-            "Please wait while I analyze your file."
+            "⚡ **Initializing Process**\n\n"
+            "Please wait while I analyze the video..."
         )
         
-        # Create new session
-        session = UserSession()
-        session.file_id = file_info.file_id
-        session.status_message = status_msg
-        user_data[user_id] = session
+        # Initialize user data with default settings
+        user_data[user_id] = {
+            'file_path': None,
+            'streams': None,
+            'selected_streams': set(),
+            'compression_settings': DEFAULT_SETTINGS.copy(),
+            'status_msg': status_msg,
+            'start_time': time.time()
+        }
+
+        # Analyze video first
+        await status_msg.edit_text("🔍 Analyzing video streams...")
         
-        # Show initial options
-        buttons = ButtonManager.create_initial_options(session)
+        # Download progress wrapper
+        async def progress_wrapper(current, total):
+            try:
+                await progress(current, total, status_msg, time.time(), "download")
+            except Exception as e:
+                print(f"Progress error: {str(e)}")
+        
+        # Download the file
+        file_path = await message.download(
+            progress=progress_wrapper
+        )
+        
+        user_data[user_id]['file_path'] = file_path
+        
+        # Get video info
+        video_info = await get_video_info(file_path)
+        user_data[user_id]['video_info'] = video_info
+        
+        # Format video information
+        size_mb = video_info['size'] / (1024 * 1024)
+        duration = int(video_info['duration'])
+        
+        if video_info['streams']['video']:
+            video_stream = video_info['streams']['video'][0]
+            info_text = (
+                "**📝 Video Information:**\n\n"
+                f"• **Size:** `{size_mb:.2f}` MB\n"
+                f"• **Duration:** `{timedelta(seconds=duration)}`\n"
+                f"• **Resolution:** `{video_stream['width']}x{video_stream['height']}`\n"
+                f"• **Codec:** `{video_stream['codec']}`\n"
+                f"• **FPS:** `{video_stream['fps']:.2f}`\n\n"
+                f"• **Audio Tracks:** `{len(video_info['streams']['audio'])}`\n"
+                f"• **Subtitles:** `{len(video_info['streams']['subtitle'])}`\n\n"
+                "**Choose operation:**"
+            )
+        else:
+            info_text = "⚠️ No video stream found!\n\nChoose operation:"
+        
+        # Show main menu
         await status_msg.edit_text(
-            "**🎯 Select Operations**\n\n"
-            "Choose what you want to do with this file:\n\n"
-            "• Remove Streams - Select streams to remove\n"
-            "• Compress Video - Compress with custom settings\n\n"
-            "_You can select multiple operations_",
-            reply_markup=InlineKeyboardMarkup(buttons)
+            info_text,
+            reply_markup=create_main_menu()
         )
         
     except Exception as e:
         error_msg = f"❌ **Error:** {str(e)}"
-        if 'status_msg' in locals():
+        try:
             await status_msg.edit_text(error_msg)
-        else:
+        except:
             await message.reply_text(error_msg)
         
+        # Cleanup
         if user_id in user_data:
+            file_path = user_data[user_id].get('file_path')
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
             del user_data[user_id]
 
 @app.on_message(filters.text & filters.private)
 async def handle_text(client, message: Message):
-    """Handle text messages (for rename operation)"""
-    user_id = message.from_user.id
-    
-    if user_id not in user_data:
-        return
-    
-    session = user_data[user_id]
-    
-    if not session.settings.get('awaiting_rename'):
-        return
-        
     try:
-        if message.text == "/cancel":
-            session.settings['awaiting_rename'] = False
-            session.settings['new_filename'] = None
-            buttons = ButtonManager.create_rename_buttons()
-            await session.status_message.edit_text(
-                "**📤 Choose upload options:**",
-                reply_markup=InlineKeyboardMarkup(buttons)
-            )
-        else:
-            # Sanitize filename
-            new_filename = FileManager.get_safe_filename(message.text)
-            if not new_filename:
-                await message.reply_text(
-                    "❌ Invalid filename. Please use only letters, numbers, spaces, or - _"
-                )
-                return
-                
-            session.settings['new_filename'] = new_filename
-            session.settings['awaiting_rename'] = False
-            
-            buttons = ButtonManager.create_rename_buttons()
-            await session.status_message.edit_text(
-                f"**✅ Filename set to:** `{new_filename}`\n\n"
-                "Now choose how you want to upload the file:",
-                reply_markup=InlineKeyboardMarkup(buttons)
-            )
+        user_id = message.from_user.id
         
-        # Delete user's message to keep chat clean
-        await message.delete()
+        if user_id in user_data and user_data[user_id].get('awaiting_rename'):
+            status_msg = user_data[user_id].get('status_msg')
+            
+            if message.text in ["/skip", "/cancel"]:
+                # Use original filename
+                original_name = os.path.splitext(os.path.basename(user_data[user_id]['file_path']))[0]
+                user_data[user_id]['new_filename'] = original_name
+            else:
+                # Update filename
+                user_data[user_id]['new_filename'] = message.text
+            
+            user_data[user_id]['awaiting_rename'] = False
+            
+            # Edit original message with upload format options
+            if status_msg:
+                await status_msg.edit_text(
+                    f"**📝 File Name:** `{user_data[user_id]['new_filename']}`\n\n"
+                    "Choose upload format:",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📹 Send as Video", callback_data="upload_video"),
+                         InlineKeyboardButton("📄 Send as Document", callback_data="upload_document")],
+                        [InlineKeyboardButton("✏️ Rename Again", callback_data="rename_file")],
+                        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+                    ])
+                )
+            
+            # Delete user's message
+            await message.delete()
+            return
+        
+        # Handle other text messages
+        await message.reply_text(
+            "📤 Please send me a video file to process.\n"
+            "Use /help to see available options."
+        )
         
     except Exception as e:
         await message.reply_text(f"❌ **Error:** {str(e)}")
 
-async def process_and_upload_file(client, callback_query: CallbackQuery, upload_mode: str):
-    """Handle file processing and uploading"""
-    user_id = callback_query.from_user.id
-    session = user_data[user_id]
-    message = session.status_message
-    
+@app.on_message(filters.command("cancel"))
+async def cancel_command(client, message: Message):
     try:
-        # Download original file if not downloaded yet
-        if not session.file_path:
-            start_time = time.time()
-            await message.edit_text("📥 **Downloading file...**")
-            
-            async def progress_wrapper(current, total):
-                await progress(current, total, message, start_time, "Downloading")
-            
-            session.file_path = await client.download_media(
-                session.file_id,
-                progress=progress_wrapper
-            )
-        
-        if not session.file_path:
-            raise Exception("Download failed")
-        
-        # Process video
-        processor = VideoProcessor()
-        output_file = await processor.process_video(session.file_path, session, message)
-        
-        if not output_file or not os.path.exists(output_file):
-            raise Exception("Processing failed")
-        
-        # Extract thumbnail and metadata
-        thumb_data = await extract_thumbnail(output_file)
-        
-        # Prepare filename
-        if session.settings['new_filename']:
-            filename = f"{session.settings['new_filename']}{os.path.splitext(output_file)[1]}"
-            final_path = os.path.join(os.path.dirname(output_file), filename)
-            os.rename(output_file, final_path)
-            output_file = final_path
-        else:
-            filename = os.path.basename(output_file)
-        
-        # Upload file
-        start_time = time.time()
-        caption = f"**{filename}**"
-        
-        async def progress_wrapper(current, total):
-            await progress(current, total, message, start_time, "Uploading")
-        
-        if upload_mode == "video":
-            await client.send_video(
-                callback_query.message.chat.id,
-                output_file,
-                caption=caption,
-                duration=thumb_data['duration'] if thumb_data else None,
-                width=thumb_data['width'] if thumb_data else None,
-                height=thumb_data['height'] if thumb_data else None,
-                thumb=thumb_data['thumb_path'] if thumb_data else None,
-                progress=progress_wrapper
-            )
-        else:
-            await client.send_document(
-                callback_query.message.chat.id,
-                output_file,
-                caption=caption,
-                thumb=thumb_data['thumb_path'] if thumb_data else None,
-                progress=progress_wrapper
-            )
-        
-        await message.edit_text("✅ **Process completed successfully!**")
-        
-    except Exception as e:
-        await message.edit_text(f"❌ **Error:** {str(e)}")
-    finally:
-        # Cleanup
-        try:
-            if session.file_path and os.path.exists(session.file_path):
-                os.remove(session.file_path)
-            if 'output_file' in locals() and os.path.exists(output_file):
-                os.remove(output_file)
-            if 'thumb_data' in locals() and thumb_data and thumb_data['thumb_path']:
-                os.remove(thumb_data['thumb_path'])
-        except Exception as e:
-            print(f"Cleanup error: {str(e)}")
-        
+        user_id = message.from_user.id
         if user_id in user_data:
+            # Cleanup files
+            file_path = user_data[user_id].get('file_path')
+            compressed_file = user_data[user_id].get('compressed_file')
+            
+            for path in [file_path, compressed_file]:
+                if path and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except:
+                        pass
+            
             del user_data[user_id]
+            
+            await message.reply_text(
+                "❌ Operation cancelled.\n\n"
+                "Send another video to start again."
+            )
+        else:
+            await message.reply_text("No active process to cancel.")
+            
+    except Exception as e:
+        await message.reply_text(f"❌ **Error:** {str(e)}")
 
-# Part 5: Callback Handlers and Advanced Features
 
 @app.on_callback_query()
 async def handle_callback(client, callback_query: CallbackQuery):
-    """Handle all callback queries"""
-    user_id = callback_query.from_user.id
-    data = callback_query.data
-    
-    # Handle help and about callbacks without session
-    if data in ["show_help", "show_about", "back_to_start"]:
-        await handle_info_callbacks(callback_query)
-        return
-    
-    # Check session validity
-    if user_id not in user_data and data not in ['header']:
-        await callback_query.answer("Session expired. Please send the video again.", show_alert=True)
-        return
-    
-    if data == "header":
-        await callback_query.answer("Section header")
-        return
-
-    session = user_data[user_id]
-    session.last_activity = time.time()
-    
     try:
-        if data == "toggle_remove_streams":
-            await handle_toggle_streams(callback_query, session)
-            
-        elif data == "toggle_compress":
-            await handle_toggle_compress(callback_query, session)
-            
-        elif data == "continue":
-            await handle_continue(client, callback_query, session)
-            
-        elif data.startswith("stream_"):
-            await handle_stream_selection(callback_query, session)
-            
-        elif data.startswith(("res_", "crf_", "preset_")):
-            await handle_compression_settings(callback_query, session)
-            
-        elif data == "comp_continue":
-            await handle_compression_continue(callback_query, session)
-            
-        elif data == "rename":
-            await handle_rename(callback_query, session)
-            
-        elif data.startswith("upload_"):
-            await handle_upload(client, callback_query, session)
-            
-        elif data == "back_to_settings":
-            await handle_back_to_settings(callback_query, session)
-            
-        elif data == "cancel":
-            await handle_cancel(callback_query, session)
-            
-    except Exception as e:
-        await callback_query.message.edit_text(f"❌ **Error:** {str(e)}")
-        if user_id in user_data:
-            del user_data[user_id]
-
-async def handle_info_callbacks(callback_query: CallbackQuery):
-    """Handle help and about button callbacks"""
-    if callback_query.data == "show_help":
-        text = MessageFormatter.get_help_message()
-    elif callback_query.data == "show_about":
-        text = MessageFormatter.get_about_message()
-    else:  # back_to_start
-        text = MessageFormatter.get_start_message()
-        await callback_query.message.edit_text(
-            text,
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📚 Help", callback_data="show_help"),
-                InlineKeyboardButton("ℹ️ About", callback_data="show_about")
-            ]])
-        )
-        return
-    
-    await callback_query.message.edit_text(
-        text,
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("◀️ Back", callback_data="back_to_start")
-        ]])
-    )
-
-async def handle_toggle_streams(callback_query: CallbackQuery, session: UserSession):
-    """Handle stream removal toggle"""
-    session.settings['remove_streams']['enabled'] = not session.settings['remove_streams']['enabled']
-    buttons = ButtonManager.create_initial_options(session)
-    await callback_query.message.edit_text(
-        "**🎯 Select Operations**\n\n"
-        f"{MessageFormatter.get_settings_summary(session)}",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-async def handle_toggle_compress(callback_query: CallbackQuery, session: UserSession):
-    """Handle compression toggle"""
-    session.settings['compression']['enabled'] = not session.settings['compression']['enabled']
-    buttons = ButtonManager.create_initial_options(session)
-    await callback_query.message.edit_text(
-        "**🎯 Select Operations**\n\n"
-        f"{MessageFormatter.get_settings_summary(session)}",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-async def handle_continue(client, callback_query: CallbackQuery, session: UserSession):
-    """Handle continue button press"""
-    try:
-        if not any(session.settings[op]['enabled'] for op in ['remove_streams', 'compression']):
-            await callback_query.answer("Please select at least one operation!", show_alert=True)
+        user_id = callback_query.from_user.id
+        data = callback_query.data
+        
+        if user_id not in user_data and data not in ["show_help", "cancel"]:
+            await callback_query.answer("Session expired. Please send video again.", show_alert=True)
             return
-        
-        # Start downloading
-        start_time = time.time()
-        await callback_query.message.edit_text("📥 **Downloading file...**")
-        
-        async def progress_wrapper(current, total):
-            await progress(current, total, callback_query.message, start_time, "Downloading")
-        
-        session.file_path = await client.download_media(
-            session.file_id,
-            progress=progress_wrapper
-        )
-        
-        if not session.file_path:
-            raise Exception("Download failed")
-        
-        # Get stream information if needed
-        if session.settings['remove_streams']['enabled']:
-            video_info = await VideoProcessor.get_video_info(session.file_path)
-            session.streams = video_info['streams']
-            
-            buttons = ButtonManager.create_stream_buttons(
-                session.streams,
-                session.settings['remove_streams']['selected_streams']
-            )
+
+        if data == "header":
+            await callback_query.answer("Section header")
+            return
+
+        # Help and Main Menu
+        if data == "show_help":
             await callback_query.message.edit_text(
-                "**🎯 Select streams to remove:**\n\n"
-                "⬜️ = Keep stream\n"
-                "☑️ = Remove stream",
-                reply_markup=InlineKeyboardMarkup(buttons)
-            )
-        elif session.settings['compression']['enabled']:
-            buttons = ButtonManager.create_compression_buttons(session.settings['compression'])
-            await callback_query.message.edit_text(
-                "**🔄 Compression Settings**\n\n"
-                "Configure your compression settings:",
-                reply_markup=InlineKeyboardMarkup(buttons)
+                HELP_TEXT,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅️ Back", callback_data="back_to_start")
+                ]])
             )
             
+        elif data == "back_to_start":
+            await callback_query.message.edit_text(
+                "**🎥 Welcome to Video Processing Bot!**\n\n"
+                "Send me any video file to:\n"
+                "• 🎯 Compress with HEVC (x265)\n"
+                "• ✂️ Remove unwanted streams\n"
+                "• 📊 Adjust quality (CRF 15-30)\n"
+                "• 🎨 Choose pixel format\n\n"
+                "**Features:**\n"
+                "• Advanced compression\n"
+                "• 10-bit support\n"
+                "• Multiple presets\n"
+                "• Stream selection\n"
+                "• Progress tracking\n\n"
+                "ℹ️ Send any video to start processing!",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💡 Help", callback_data="show_help")],
+                    [InlineKeyboardButton("👨‍💻 Developer", url="https://t.me/YourUsername")]
+                ])
+            )
+
+        # Compression Settings Menu
+        elif data == "compress_start":
+            settings = user_data[user_id]['compression_settings']
+            await callback_query.message.edit_text(
+                "**⚙️ Compression Settings**\n\n"
+                f"Current Settings:\n"
+                f"• Preset: `{settings['preset']}`\n"
+                f"• CRF: `{settings['crf']}`\n"
+                f"• Pixel Format: `{settings['pixel_format']}`\n"
+                f"• Audio: `{'Copy' if settings['copy_audio'] else 'Re-encode'}`\n"
+                f"• Subtitles: `{'Copy' if settings['copy_subs'] else 'Remove'}`\n\n"
+                "Select option to modify:",
+                reply_markup=create_settings_menu(settings)
+            )
+
+        # Show Preset Selection
+        elif data == "show_preset":
+            buttons = []
+            row = []
+            current_preset = user_data[user_id]['compression_settings']['preset']
+            
+            for preset in COMPRESSION_SETTINGS['presets']:
+                current = "✅ " if preset == current_preset else ""
+                row.append(InlineKeyboardButton(f"{current}{preset}", callback_data=f"preset_{preset}"))
+                if len(row) == 2:
+                    buttons.append(row)
+                    row = []
+            if row:
+                buttons.append(row)
+            buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="compress_start")])
+            
+            await callback_query.message.edit_text(
+                "**⚙️ Select Encoding Preset:**\n\n"
+                "• ultrafast = Fastest, largest size\n"
+                "• medium = Balanced option\n"
+                "• veryslow = Best compression, slowest\n\n"
+                f"Current: `{current_preset}`",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+
+        # Show CRF Selection
+        elif data == "show_crf":
+            buttons = []
+            row = []
+            current_crf = user_data[user_id]['compression_settings']['crf']
+            
+            for crf in range(15, 31):
+                current = "✅ " if crf == current_crf else ""
+                row.append(InlineKeyboardButton(f"{current}{crf}", callback_data=f"crf_{crf}"))
+                if len(row) == 4:
+                    buttons.append(row)
+                    row = []
+            if row:
+                buttons.append(row)
+            buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="compress_start")])
+            
+            await callback_query.message.edit_text(
+                "**📊 Select CRF Value:**\n\n"
+                "• 15-18 = Visually lossless\n"
+                "• 19-23 = High quality\n"
+                "• 24-27 = Medium quality\n"
+                "• 28-30 = Low quality\n\n"
+                f"Current: `{current_crf}`",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+
+        # Show Pixel Format Selection
+        elif data == "show_pixfmt":
+            buttons = []
+            current_fmt = user_data[user_id]['compression_settings']['pixel_format']
+            
+            for fmt, desc in COMPRESSION_SETTINGS['pixel_formats']:
+                current = "✅ " if fmt == current_fmt else ""
+                buttons.append([InlineKeyboardButton(f"{current}{desc}", callback_data=f"pixfmt_{fmt}")])
+            
+            buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="compress_start")])
+            
+            await callback_query.message.edit_text(
+                "**🎨 Select Pixel Format:**\n\n"
+                "• 8-bit = Standard compatibility\n"
+                "• 10-bit = Better quality, HDR support\n"
+                "• 10-bit High = Best quality, larger size\n\n"
+                f"Current: `{current_fmt}`",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+
+        # Handle Setting Updates
+        elif data.startswith(("preset_", "pixfmt_", "crf_")):
+            setting_type, value = data.split("_")
+            settings = user_data[user_id]['compression_settings']
+            
+            if setting_type == "preset":
+                settings['preset'] = value
+            elif setting_type == "pixfmt":
+                settings['pixel_format'] = value
+            elif setting_type == "crf":
+                settings['crf'] = int(value)
+            
+            await callback_query.answer(f"{setting_type.title()} updated!")
+            await callback_query.message.edit_text(
+                "**⚙️ Compression Settings**\n\n"
+                f"• Preset: `{settings['preset']}`\n"
+                f"• CRF: `{settings['crf']}`\n"
+                f"• Pixel Format: `{settings['pixel_format']}`\n"
+                f"• Audio: `{'Copy' if settings['copy_audio'] else 'Re-encode'}`\n"
+                f"• Subtitles: `{'Copy' if settings['copy_subs'] else 'Remove'}`\n\n"
+                "Select option to modify:",
+                reply_markup=create_settings_menu(settings)
+            )
+
+        # Toggle Audio/Subtitle Settings
+        elif data in ["toggle_audio", "toggle_subs"]:
+            settings = user_data[user_id]['compression_settings']
+            if data == "toggle_audio":
+                settings['copy_audio'] = not settings['copy_audio']
+            else:
+                settings['copy_subs'] = not settings['copy_subs']
+            
+            await callback_query.message.edit_reply_markup(
+                reply_markup=create_settings_menu(settings)
+            )
+
+        # Start Processing
+        elif data == "start_compress":
+            settings = user_data[user_id]['compression_settings']
+            input_file = user_data[user_id]['file_path']
+            output_file = f"compressed_{os.path.basename(input_file)}"
+            status_msg = await callback_query.message.edit_text("🔄 Preparing compression...")
+
+            try:
+                command = [
+                    "ffmpeg", "-y",
+                    "-i", input_file,
+                    "-c:v", "libx265",
+                    "-preset", settings['preset'],
+                    "-crf", str(settings['crf']),
+                    "-pix_fmt", settings['pixel_format']
+                ]
+
+                if settings['copy_audio']:
+                    command.extend(["-c:a", "copy"])
+                else:
+                    command.extend(["-c:a", "aac", "-b:a", "128k"])
+
+                if settings['copy_subs']:
+                    command.extend(["-c:s", "copy"])
+                else:
+                    command.extend(["-sn"])
+
+                command.append(output_file)
+
+                success = await run_ffmpeg_with_progress(command, status_msg, input_file)
+
+                if success:
+                    user_data[user_id]['compressed_file'] = output_file
+                    await status_msg.edit_text(
+                        "✅ **Compression Complete!**\n\n"
+                        "Choose upload format:",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("📹 Send as Video", callback_data="upload_video"),
+                             InlineKeyboardButton("📄 Send as Document", callback_data="upload_document")],
+                            [InlineKeyboardButton("✏️ Rename File", callback_data="rename_file")],
+                            [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+                        ])
+                    )
+                else:
+                    raise Exception("Compression failed")
+
+            except Exception as e:
+                await status_msg.edit_text(f"❌ **Error:** {str(e)}")
+                if os.path.exists(output_file):
+                    os.remove(output_file)
+
+        # Handle Rename
+        elif data == "rename_file":
+            user_data[user_id]['awaiting_rename'] = True
+            await callback_query.message.edit_text(
+                "**✏️ Send new filename:**\n\n"
+                "• Send the name without extension\n"
+                "• /skip to use original name\n"
+                "• /cancel to cancel process",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⬅️ Back", callback_data="back_to_upload")]
+                ])
+            )
+
+        # Handle Upload
+        elif data in ["upload_video", "upload_document"]:
+            status_msg = await callback_query.message.edit_text("🔄 Preparing upload...")
+            
+            try:
+                input_file = user_data[user_id]['compressed_file']
+                new_filename = user_data[user_id].get('new_filename', 
+                    os.path.splitext(os.path.basename(input_file))[0])
+                
+                thumb_data = await extract_thumbnail(input_file)
+                if not thumb_data:
+                    raise Exception("Failed to extract video metadata")
+
+                original_size = os.path.getsize(user_data[user_id]['file_path'])
+                compressed_size = os.path.getsize(input_file)
+                ratio = (1 - (compressed_size / original_size)) * 100
+
+                settings = user_data[user_id]['compression_settings']
+                caption = (
+                    f"**{new_filename}**\n\n"
+                    f"⚙️ **Compression Info:**\n"
+                    f"• Preset: `{settings['preset']}`\n"
+                    f"• CRF: `{settings['crf']}`\n"
+                    f"• Pixel Format: `{settings['pixel_format']}`\n"
+                    f"• Size Reduced: `{ratio:.1f}%`\n"
+                    f"• Duration: `{timedelta(seconds=int(thumb_data['duration']))}`\n\n"
+                    f"🎬 **Original Size:** `{format_size(original_size)}`\n"
+                    f"📦 **New Size:** `{format_size(compressed_size)}`"
+                )
+
+                async def upload_progress(current, total):
+                    await progress(current, total, status_msg, time.time(), "upload")
+
+                if data == "upload_video":
+                    await client.send_video(
+                        callback_query.message.chat.id,
+                        input_file,
+                        caption=caption,
+                        thumb=thumb_data['thumb_path'],
+                        duration=int(thumb_data['duration']),
+                        width=thumb_data['width'],
+                        height=thumb_data['height'],
+                        progress=upload_progress,
+                        supports_streaming=True
+                    )
+                else:
+                    await client.send_document(
+                        callback_query.message.chat.id,
+                        input_file,
+                        caption=caption,
+                        thumb=thumb_data['thumb_path'],
+                        progress=upload_progress,
+                        force_document=True
+                    )
+
+                await status_msg.edit_text(
+                    "✅ **Process Completed Successfully!**\n\n"
+                    f"📊 Size Reduced by: `{ratio:.1f}%`\n"
+                    f"📦 Final Size: `{format_size(compressed_size)}`\n\n"
+                    "Send another video to start again."
+                )
+
+            except Exception as e:
+                await status_msg.edit_text(f"❌ **Error:** {str(e)}")
+            finally:
+                # Cleanup
+                try:
+                    if os.path.exists(input_file):
+                        os.remove(input_file)
+                    if thumb_data and thumb_data['thumb_path']:
+                        os.remove(thumb_data['thumb_path'])
+                except:
+                    pass
+
+        # Handle Cancel
+        elif data == "cancel":
+            if user_id in user_data:
+                file_path = user_data[user_id].get('file_path')
+                compressed_file = user_data[user_id].get('compressed_file')
+                
+                for path in [file_path, compressed_file]:
+                    if path and os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except:
+                            pass
+                
+                del user_data[user_id]
+            
+            await callback_query.message.edit_text(
+                "❌ Operation cancelled.\n\n"
+                "Send another video to start again."
+            )
+
+        # Handle Back to Upload Options
+        elif data == "back_to_upload":
+            await callback_query.message.edit_text(
+                "Choose upload format:",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📹 Send as Video", callback_data="upload_video"),
+                     InlineKeyboardButton("📄 Send as Document", callback_data="upload_document")],
+                    [InlineKeyboardButton("✏️ Rename File", callback_data="rename_file")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+                ])
+            )
+
+        # Handle Stream Selection
+        elif data == "remove_streams":
+            video_info = user_data[user_id]['video_info']
+            buttons = []
+            
+            # Add video streams
+            for i, stream in enumerate(video_info['streams']['video']):
+                buttons.append([InlineKeyboardButton(
+                    f"🎥 Video: {stream['width']}x{stream['height']} ({stream['codec']})",
+                    callback_data=f"stream_{i}"
+                )])
+            
+            # Add audio streams
+            for i, stream in enumerate(video_info['streams']['audio'], len(video_info['streams']['video'])):
+                lang = stream['language']
+                title = f" - {stream['title']}" if stream['title'] else ""
+                buttons.append([InlineKeyboardButton(
+                    f"🔊 Audio: {lang}{title} ({stream['codec']})",
+                    callback_data=f"stream_{i}"
+                )])
+            
+            # Add subtitle streams
+            start_idx = len(video_info['streams']['video']) + len(video_info['streams']['audio'])
+            for i, stream in enumerate(video_info['streams']['subtitle'], start_idx):
+                lang = stream['language']
+                title = f" - {stream['title']}" if stream['title'] else ""
+                buttons.append([InlineKeyboardButton(
+                    f"💬 Subtitle: {lang}{title}",
+                    callback_data=f"stream_{i}"
+                )])
+            
+            buttons.append([InlineKeyboardButton("✅ Continue", callback_data="process_streams")])
+            buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
+            
+            await callback_query.message.edit_text(
+                "**✂️ Select Streams to Remove:**\n\n"
+                "• Click to toggle stream removal\n"
+                "• Selected streams will be removed\n"
+                "• Click Continue when done",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+
+        # Handle Stream Toggle
+        elif data.startswith("stream_"):
+            stream_idx = int(data.split("_")[1])
+            if stream_idx in user_data[user_id]['selected_streams']:
+                user_data[user_id]['selected_streams'].remove(stream_idx)
+            else:
+                user_data[user_id]['selected_streams'].add(stream_idx)
+            
+            # Recreate stream selection menu with updated selections
+            video_info = user_data[user_id]['video_info']
+            buttons = []
+            
+            # Add video streams
+            for i, stream in enumerate(video_info['streams']['video']):
+                selected = "✅ " if i in user_data[user_id]['selected_streams'] else ""
+                buttons.append([InlineKeyboardButton(
+                    f"{selected}🎥 Video: {stream['width']}x{stream['height']} ({stream['codec']})",
+                    callback_data=f"stream_{i}"
+                )])
+            
+            # Add audio streams
+            for i, stream in enumerate(video_info['streams']['audio'], len(video_info['streams']['video'])):
+                selected = "✅ " if i in user_data[user_id]['selected_streams'] else ""
+                lang = stream['language']
+                title = f" - {stream['title']}" if stream['title'] else ""
+                buttons.append([InlineKeyboardButton(
+                    f"{selected}🔊 Audio: {lang}{title} ({stream['codec']})",
+                    callback_data=f"stream_{i}"
+                )])
+            
+            # Add subtitle streams
+            start_idx = len(video_info['streams']['video']) + len(video_info['streams']['audio'])
+            for i, stream in enumerate(video_info['streams']['subtitle'], start_idx):
+                selected = "✅ " if i in user_data[user_id]['selected_streams'] else ""
+                lang = stream['language']
+                title = f" - {stream['title']}" if stream['title'] else ""
+                buttons.append([InlineKeyboardButton(
+                    f"{selected}💬 Subtitle: {lang}{title}",
+                    callback_data=f"stream_{i}"
+                )])
+            
+            buttons.append([InlineKeyboardButton("✅ Continue", callback_data="process_streams")])
+            buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
+            
+            await callback_query.message.edit_reply_markup(
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+
+        # Process Stream Removal
+        elif data == "process_streams":
+            if not user_data[user_id]['selected_streams']:
+                await callback_query.answer("No streams selected to remove!", show_alert=True)
+                return
+
+            status_msg = await callback_query.message.edit_text("🔄 Processing streams...")
+            
+            try:
+                output_file = await process_video(
+                    user_data[user_id]['file_path'],
+                    user_data[user_id]['selected_streams'],
+                    len(user_data[user_id]['video_info']['streams'])
+                )
+                
+                user_data[user_id]['compressed_file'] = output_file
+                await status_msg.edit_text(
+                    "✅ **Streams Removed Successfully!**\n\n"
+                    "Choose upload format:",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📹 Send as Video", callback_data="upload_video"),
+                         InlineKeyboardButton("📄 Send as Document", callback_data="upload_document")],
+                        [InlineKeyboardButton("✏️ Rename File", callback_data="rename_file")],
+                        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+                    ])
+                )
+            
+            except Exception as e:
+                await status_msg.edit_text(f"❌ **Error:** {str(e)}")
+
     except Exception as e:
-        await callback_query.message.edit_text(f"❌ **Error:** {str(e)}")
-        if callback_query.from_user.id in user_data:
-            del user_data[callback_query.from_user.id]
-
-async def handle_stream_selection(callback_query: CallbackQuery, session: UserSession):
-    """Handle stream selection"""
-    stream_index = int(callback_query.data.split("_")[1])
-    if stream_index in session.settings['remove_streams']['selected_streams']:
-        session.settings['remove_streams']['selected_streams'].remove(stream_index)
-    else:
-        session.settings['remove_streams']['selected_streams'].add(stream_index)
-    
-    buttons = ButtonManager.create_stream_buttons(
-        session.streams,
-        session.settings['remove_streams']['selected_streams']
-    )
-    await callback_query.message.edit_reply_markup(
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-async def handle_compression_settings(callback_query: CallbackQuery, session: UserSession):
-    """Handle compression setting changes"""
-    data = callback_query.data
-    settings = session.settings['compression']
-    
-    if data.startswith("res_"):
-        settings['resolution'] = None if data == "res_original" else data.replace("res_", "") + "p"
-    elif data.startswith("crf_"):
-        settings['crf'] = int(data.replace("crf_", ""))
-    elif data.startswith("preset_"):
-        settings['preset'] = data.replace("preset_", "")
-    
-    buttons = ButtonManager.create_compression_buttons(settings)
-    await callback_query.message.edit_text(
-        "**🔄 Compression Settings**\n\n"
-        f"{MessageFormatter.get_settings_summary(session)}",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-async def handle_compression_continue(callback_query: CallbackQuery, session: UserSession):
-    """Handle compression settings completion"""
-    buttons = ButtonManager.create_rename_buttons()
-    await callback_query.message.edit_text(
-        "**📤 Choose upload options:**\n\n"
-        "• Rename file (optional)\n"
-        "• Select upload format",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-async def handle_rename(callback_query: CallbackQuery, session: UserSession):
-    """Handle rename button press"""
-    session.settings['awaiting_rename'] = True
-    await callback_query.message.edit_text(
-        MessageFormatter.get_rename_instructions(),
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("⬅️ Back", callback_data="back_to_settings")
-        ]])
-    )
-
-async def handle_upload(client, callback_query: CallbackQuery, session: UserSession):
-    """Handle upload button press"""
-    upload_mode = callback_query.data.replace("upload_", "")
-    await process_and_upload_file(client, callback_query, upload_mode)
-
-async def handle_back_to_settings(callback_query: CallbackQuery, session: UserSession):
-    """Handle back button press"""
-    if session.settings['remove_streams']['enabled']:
-        buttons = ButtonManager.create_stream_buttons(
-            session.streams,
-            session.settings['remove_streams']['selected_streams']
-        )
-        await callback_query.message.edit_text(
-            "**🎯 Select streams to remove:**\n\n"
-            "⬜️ = Keep stream\n"
-            "☑️ = Remove stream",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-    elif session.settings['compression']['enabled']:
-        buttons = ButtonManager.create_compression_buttons(session.settings['compression'])
-        await callback_query.message.edit_text(
-            "**🔄 Compression Settings**\n\n"
-            f"{MessageFormatter.get_settings_summary(session)}",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-
-async def handle_cancel(callback_query: CallbackQuery, session: UserSession):
-    """Handle cancel button press"""
-    if session.file_path and os.path.exists(session.file_path):
-        os.remove(session.file_path)
-    if callback_query.from_user.id in user_data:
-        del user_data[callback_query.from_user.id]
-    await callback_query.message.edit_text("❌ **Operation cancelled.**")
-
-# Session cleanup task
-async def cleanup_inactive_sessions():
-    """Cleanup inactive sessions periodically"""
-    while True:
+        error_msg = f"❌ **Error:** {str(e)}"
         try:
-            current_time = time.time()
-            for user_id, session in list(user_data.items()):
-                if current_time - session.last_activity > 1800:  # 30 minutes timeout
-                    if session.file_path and os.path.exists(session.file_path):
-                        os.remove(session.file_path)
-                    del user_data[user_id]
-            await asyncio.sleep(300)  # Check every 5 minutes
-        except Exception as e:
-            print(f"Session cleanup error: {str(e)}")
-
-# Start the cleanup task
-app.loop.create_task(cleanup_inactive_sessions())
-
+            await callback_query.answer(error_msg, show_alert=True)
+        except:
+            await callback_query.message.edit_text(error_msg)
+# Start the bot
 print("🚀 Bot is starting...")
 app.run()
