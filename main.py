@@ -26,13 +26,25 @@ user_data = {}
 
 # Compression Settings
 COMPRESSION_SETTINGS = {
-    'presets': ['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow'],
+    'presets': [
+        ('ultrafast', 'Fastest (Largest Size)'),
+        ('superfast', 'Very Fast'),
+        ('veryfast', 'Fast'),
+        ('faster', 'Quick'),
+        ('medium', 'Balanced'),
+        ('slow', 'Better Quality'),
+        ('veryslow', 'Best Quality (Slowest)')
+    ],
     'pixel_formats': [
         ('yuv420p', '8-bit Compatible'),
         ('yuv420p10le', '10-bit Standard'),
         ('yuv444p10le', '10-bit High Quality')
     ],
-    'crf_range': range(15, 31)
+    'crf_range': {
+        'low': range(15, 19),     # High Quality
+        'medium': range(19, 24),   # Good Quality
+        'high': range(24, 31)      # Smaller Size
+    }
 }
 
 # Default Settings
@@ -70,6 +82,7 @@ Send me any video file to:
 """
 
 def format_time(seconds):
+    """Format time in seconds to readable format"""
     if seconds < 60:
         return f"{seconds:.1f}s"
     elif seconds < 3600:
@@ -83,6 +96,7 @@ def format_time(seconds):
         return f"{hours}h {minutes}m {seconds:.1f}s"
 
 def format_size(size):
+    """Format size in bytes to readable format"""
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
         if size < 1024:
             return f"{size:.2f} {unit}"
@@ -99,10 +113,11 @@ class FFmpegProgress:
         self.message = message
         self.start_time = time.time()
         self.last_update_time = 0
-        self.update_interval = 2
+        self.update_interval = 2  # Update every 2 seconds
 
-    async def update_progress(self, current, total, operation):
+    async def update_progress(self, current, total, operation="Processing"):
         now = time.time()
+        # Only update if enough time has passed since last update
         if now - self.last_update_time < self.update_interval and current != total:
             return
 
@@ -115,14 +130,14 @@ class FFmpegProgress:
         
         try:
             await self.message.edit_text(
-                f"{operation}\n\n"
+                f"🔄 **{operation}**\n\n"
                 f"╭─❰ 𝙿𝚛𝚘𝚐𝚛𝚎𝚜𝚜 ❱\n"
                 f"│\n"
                 f"├ {bar}\n"
-                f"├ **Progress:** `{percent:.1f}%`\n"
                 f"├ **Speed:** `{format_size(speed)}/s`\n"
                 f"├ **Processed:** `{format_size(current)}`\n"
                 f"├ **Total:** `{format_size(total)}`\n"
+                f"├ **Progress:** `{percent:.1f}%`\n"
                 f"├ **Time:** `{format_time(elapsed_time)}`\n"
                 f"├ **ETA:** `{format_time(eta)}`\n"
                 f"│\n"
@@ -130,11 +145,53 @@ class FFmpegProgress:
             )
         except Exception as e:
             print(f"Progress update error: {str(e)}")
+async def parse_ffmpeg_progress(line: str) -> dict:
+    """Parse FFmpeg progress information from output line"""
+    progress_data = {}
+    
+    try:
+        # Time pattern HH:MM:SS
+        time_pattern = re.compile(r"time=(\d{2}):(\d{2}):(\d{2})\.\d+")
+        # Speed pattern (e.g., speed=2.5x)
+        speed_pattern = re.compile(r"speed=\s*(\d+\.\d+)x")
+        # FPS pattern
+        fps_pattern = re.compile(r"fps=\s*(\d+)")
+        # Size pattern (e.g., size=10kB)
+        size_pattern = re.compile(r"size=\s*(\d+)kB")
+        
+        # Extract time
+        time_match = time_pattern.search(line)
+        if time_match:
+            hours, minutes, seconds = map(int, time_match.groups())
+            progress_data['time'] = hours * 3600 + minutes * 60 + seconds
+            
+        # Extract speed
+        speed_match = speed_pattern.search(line)
+        if speed_match:
+            progress_data['speed'] = float(speed_match.group(1))
+            
+        # Extract fps
+        fps_match = fps_pattern.search(line)
+        if fps_match:
+            progress_data['fps'] = int(fps_match.group(1))
+            
+        # Extract size
+        size_match = size_pattern.search(line)
+        if size_match:
+            progress_data['size'] = int(size_match.group(1)) * 1024  # Convert kB to bytes
+            
+    except Exception as e:
+        print(f"Error parsing FFmpeg progress: {str(e)}")
+        
+    return progress_data
 
 def create_main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎯 Compress Video", callback_data="compress_start")],
-        [InlineKeyboardButton("✂️ Remove Streams", callback_data="remove_streams")],
+        [
+            InlineKeyboardButton("✂️ Remove Streams", callback_data="remove_streams"),
+            InlineKeyboardButton("⚙️ Settings", callback_data="show_settings")
+        ],
         [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
     ])
 
@@ -151,13 +208,145 @@ def create_settings_menu(settings):
         [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
     ])
 
-def create_final_menu():
+def create_final_menu(filename):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ Rename File", callback_data="rename_file")],
-        [InlineKeyboardButton("📹 Send as Video", callback_data="upload_video"),
-         InlineKeyboardButton("📄 Send as Document", callback_data="upload_document")],
+        [
+            InlineKeyboardButton("📹 Video", callback_data="upload_video"),
+            InlineKeyboardButton("📄 Document", callback_data="upload_document")
+        ],
+        [InlineKeyboardButton("📊 Show Stats", callback_data="show_stats")],
         [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
     ])
+
+async def run_ffmpeg_with_progress(command, message, input_file):
+    try:
+        # Get video duration
+        duration_cmd = [
+            'ffprobe', 
+            '-v', 'error', 
+            '-show_entries', 'format=duration', 
+            '-of', 'default=noprint_wrappers=1:nokey=1', 
+            input_file
+        ]
+        
+        process = await asyncio.create_subprocess_exec(
+            *duration_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await process.communicate()
+        total_duration = float(stdout.decode().strip())
+        total_size = os.path.getsize(input_file)  # Get input file size
+        
+        # Initialize progress tracker
+        progress_tracker = FFmpegProgress(message)
+        
+        # Start FFmpeg process
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        # Monitor FFmpeg progress
+        async for line in process.stderr:
+            line = line.decode('utf-8')
+            progress_data = await parse_ffmpeg_progress(line)
+            
+            if progress_data:
+                current_time = progress_data.get('time', 0)
+                current_size = progress_data.get('size', 0)
+                
+                # Calculate progress based on time and size
+                time_progress = current_time / total_duration if total_duration > 0 else 0
+                size_progress = current_size / total_size if total_size > 0 else 0
+                
+                # Use the more accurate progress metric
+                current_progress = max(time_progress, size_progress)
+                
+                # Update progress display
+                await progress_tracker.update_progress(
+                    current=int(current_progress * total_size),
+                    total=total_size,
+                    operation="Encoding Video"
+                )
+
+        await process.wait()
+        return process.returncode == 0
+
+    except Exception as e:
+        print(f"FFmpeg progress error: {str(e)}")
+        return False
+
+def create_progress_bar(current, total, length=20):
+    """Create a progress bar with custom length"""
+    filled_length = int(length * current // total)
+    bar = "█" * filled_length + "░" * (length - filled_length)
+    percent = current * 100 / total
+    return bar, percent
+
+
+async def process_with_progress(message, input_file, output_file, settings):
+    start_time = time.time()
+    process = await asyncio.create_subprocess_exec(
+        'ffmpeg', '-i', input_file,
+        '-c:v', 'libx265',
+        '-preset', settings['preset'],
+        '-crf', str(settings['crf']),
+        '-pix_fmt', settings['pixel_format'],
+        output_file,
+        stderr=asyncio.subprocess.PIPE
+    )
+    
+    while True:
+        if process.stderr:
+            line = await process.stderr.readline()
+            if not line:
+                break
+            # Update progress message
+            await update_progress_message(message, line)
+
+async def safe_process(callback_query, operation):
+    try:
+        status_msg = await callback_query.message.edit_text(
+            f"🔄 Processing {operation}..."
+        )
+        # Process operation
+        result = await process_operation(operation)
+        return result, status_msg
+    except Exception as e:
+        await handle_error(callback_query, e)
+        return None, None
+
+async def generate_preview(input_file, timestamp=None):
+    if not timestamp:
+        # Get video duration and pick middle point
+        duration = await get_video_duration(input_file)
+        timestamp = duration / 2
+    
+    preview_file = f"preview_{os.path.basename(input_file)}.jpg"
+    cmd = [
+        'ffmpeg', '-ss', str(timestamp),
+        '-i', input_file,
+        '-vframes', '1',
+        '-q:v', '2',
+        preview_file
+    ]
+    # Generate preview image
+    await run_ffmpeg_command(cmd)
+    return preview_file
+
+async def suggest_compression_settings(file_size, duration):
+    # Calculate bitrate and suggest appropriate settings
+    bitrate = (file_size * 8) / (duration * 1024)  # Kbps
+    
+    if bitrate > 5000:  # High bitrate
+        return {'preset': 'slow', 'crf': 23}
+    elif bitrate > 2000:  # Medium bitrate
+        return {'preset': 'medium', 'crf': 26}
+    else:  # Low bitrate
+        return {'preset': 'fast', 'crf': 28}
 
 async def progress(current, total, message, start_time, action):
     if not hasattr(progress, 'last_update_time'):
