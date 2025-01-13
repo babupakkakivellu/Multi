@@ -17,4 +17,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Command to run the bot
-CMD ["python3", "main.py"]
+CMD ["python3", "compression_processor.py"]
