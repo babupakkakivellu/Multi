@@ -5,16 +5,42 @@ import time
 import asyncio
 import ffmpeg
 from datetime import datetime
-from pyrogram import Client, filters
+from pyrogram import filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from config import Config, Messages, logger, humanbytes
-from bot_handlers import user_settings, progress
+from bot import app
+
+# Store user settings
+user_settings = {}
+
+async def progress(current, total, message, action):
+    """Generic progress function for upload/download"""
+    try:
+        if total == 0:
+            return
+            
+        percent = current * 100 / total
+        progress_str = (
+            f"{action}: {percent:.1f}%\n"
+            f"[{'=' * int(percent/5)}{'.' * (20-int(percent/5))}]\n"
+            f"Current: {humanbytes(current)}\n"
+            f"Total: {humanbytes(total)}\n"
+        )
+        
+        try:
+            if message.text != progress_str:
+                await message.edit_text(progress_str)
+        except Exception:
+            await asyncio.sleep(1)
+            
+    except Exception as e:
+        logger.error(f"Progress Error: {str(e)}")
 
 class UploadHandler:
     """Handles upload format selection and file uploading"""
 
     @staticmethod
-    async def show_upload_format(client: Client, callback: CallbackQuery):
+    async def show_upload_format(client, callback: CallbackQuery):
         """Show upload format selection menu"""
         try:
             markup = InlineKeyboardMarkup([
@@ -39,7 +65,7 @@ class UploadHandler:
 
     @staticmethod
     @app.on_callback_query(filters.regex("^upload_(video|document)$"))
-    async def handle_upload_format_selection(client: Client, callback: CallbackQuery):
+    async def handle_upload_format_selection(client, callback: CallbackQuery):
         """Handle upload format selection"""
         try:
             upload_format = callback.matches[0].group(1)
@@ -84,86 +110,106 @@ class FFmpegProcessor:
             await status_msg.edit_text(Messages.STATUS_MESSAGES["compressing"])
             
             # Prepare FFmpeg command
-            ffmpeg_cmd = (
+            stream = ffmpeg.input(input_file)
+            
+            # Add video filters
+            stream = ffmpeg.filter(stream, 'scale', settings['resolution'])
+            
+            # Output options
+            output_options = {
+                'preset': settings['preset'],
+                'crf': settings['crf'],
+                'pix_fmt': settings['pixel_format'],
+                'c:v': settings['codec'],
+                'c:a': 'copy',  # Copy audio stream without re-encoding
+                'threads': 0    # Use all available CPU threads
+            }
+            
+            # Run FFmpeg
+            await status_msg.edit_text("🎬 Processing video...")
+            
+            process = (
                 ffmpeg
-                .input(input_file)
-                .output(
-                    output_file,
-                    vf=f"scale={settings['resolution']}",
-                    preset=settings['preset'],
-                    crf=settings['crf'],
-                    pix_fmt=settings['pixel_format'],
-                    vcodec=settings['codec'],
-                    acodec='copy',  # Copy audio stream without re-encoding
-                    **{'threads': 0}  # Use all available CPU threads
-                )
+                .output(stream, output_file, **output_options)
                 .overwrite_output()
                 .global_args('-hide_banner')
                 .global_args('-loglevel', 'error')
+                .run_async(pipe_stdout=True, pipe_stderr=True)
             )
             
-            # Run FFmpeg
-            process = await ffmpeg_cmd.run_async(pipe_stdout=True, pipe_stderr=True)
-            await process.communicate()
+            # Wait for FFmpeg to complete
+            stdout, stderr = await process.communicate()
             
-            # Get video information
-            video_info = ffmpeg.probe(output_file)
-            video_stream = next((stream for stream in video_info['streams'] 
-                               if stream['codec_type'] == 'video'), None)
-            
-            if video_stream:
-                duration = int(float(video_info['format']['duration']))
-                width = int(video_stream['width'])
-                height = int(video_stream['height'])
+            if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+                # Get video information
+                video_info = ffmpeg.probe(output_file)
+                video_stream = next((stream for stream in video_info['streams'] 
+                                   if stream['codec_type'] == 'video'), None)
                 
-                # Calculate compression stats
-                original_size = os.path.getsize(input_file)
-                compressed_size = os.path.getsize(output_file)
-                compression_ratio = (1 - (compressed_size / original_size)) * 100
-                process_time = time.time() - start_time
-                
-                # Prepare detailed caption
-                caption = (
-                    f"🎥 Compressed Video Stats:\n\n"
-                    f"Resolution: {width}x{height}\n"
-                    f"Preset: {settings['preset']}\n"
-                    f"CRF: {settings['crf']}\n"
-                    f"Codec: {settings['codec']}\n"
-                    f"Pixel Format: {settings['pixel_format']}\n\n"
-                    f"📊 Compression Results:\n"
-                    f"Original Size: {humanbytes(original_size)}\n"
-                    f"Compressed Size: {humanbytes(compressed_size)}\n"
-                    f"Compression Ratio: {compression_ratio:.1f}%\n"
-                    f"Process Time: {process_time:.1f}s"
-                )
-                
-                # Upload based on format selection
-                await status_msg.edit_text(Messages.STATUS_MESSAGES["uploading"].format("0"))
-                
-                if settings['upload_format'] == 'video':
-                    await app.send_video(
-                        message.chat.id,
-                        output_file,
-                        duration=duration,
-                        width=width,
-                        height=height,
-                        caption=caption,
-                        progress=progress,
-                        progress_args=(status_msg, "📤 Uploading"),
-                        thumb=await FFmpegProcessor.generate_thumbnail(output_file)
+                if video_stream:
+                    duration = int(float(video_info['format']['duration']))
+                    width = int(video_stream['width'])
+                    height = int(video_stream['height'])
+                    
+                    # Calculate compression stats
+                    original_size = os.path.getsize(input_file)
+                    compressed_size = os.path.getsize(output_file)
+                    compression_ratio = (1 - (compressed_size / original_size)) * 100
+                    process_time = time.time() - start_time
+                    
+                    # Generate thumbnail
+                    thumb = await FFmpegProcessor.generate_thumbnail(output_file)
+                    
+                    # Prepare caption
+                    caption = (
+                        f"🎥 Compressed Video Stats:\n\n"
+                        f"Resolution: {width}x{height}\n"
+                        f"Preset: {settings['preset']}\n"
+                        f"CRF: {settings['crf']}\n"
+                        f"Codec: {settings['codec']}\n"
+                        f"Pixel Format: {settings['pixel_format']}\n\n"
+                        f"📊 Compression Results:\n"
+                        f"Original Size: {humanbytes(original_size)}\n"
+                        f"Compressed Size: {humanbytes(compressed_size)}\n"
+                        f"Compression Ratio: {compression_ratio:.1f}%\n"
+                        f"Process Time: {process_time:.1f}s"
                     )
-                else:
-                    await app.send_document(
-                        message.chat.id,
-                        output_file,
-                        caption=caption,
-                        progress=progress,
-                        progress_args=(status_msg, "📤 Uploading"),
-                        thumb=await FFmpegProcessor.generate_thumbnail(output_file)
-                    )
-                
-                await status_msg.edit_text(Messages.STATUS_MESSAGES["completed"])
-                logger.info(f"Compression completed for user {message.from_user.id}")
+                    
+                    # Upload based on format selection
+                    await status_msg.edit_text("📤 Uploading processed video...")
+                    
+                    try:
+                        if settings['upload_format'] == 'video':
+                            await app.send_video(
+                                message.chat.id,
+                                output_file,
+                                duration=duration,
+                                width=width,
+                                height=height,
+                                thumb=thumb,
+                                caption=caption,
+                                progress=progress,
+                                progress_args=(status_msg, "📤 Uploading")
+                            )
+                        else:
+                            await app.send_document(
+                                message.chat.id,
+                                output_file,
+                                thumb=thumb,
+                                caption=caption,
+                                progress=progress,
+                                progress_args=(status_msg, "📤 Uploading")
+                            )
+                        
+                        await status_msg.edit_text("✅ Video processed and uploaded successfully!")
+                        logger.info(f"Successfully processed video for user {message.from_user.id}")
+                        
+                    except Exception as e:
+                        logger.error(f"Upload Error: {str(e)}")
+                        await status_msg.edit_text("❌ Error uploading processed video.")
+                        
+            else:
+                raise Exception("FFmpeg processing failed")
                 
         except Exception as e:
             error_msg = f"❌ Error during compression: {str(e)}"
@@ -196,33 +242,23 @@ class FFmpegProcessor:
                 .run(capture_stdout=True, capture_stderr=True)
             )
             
-            return thumbnail_path
+            if os.path.exists(thumbnail_path):
+                return thumbnail_path
+            return None
+            
         except Exception as e:
             logger.error(f"Thumbnail Generation Error: {str(e)}")
             return None
 
-# Main execution
-if __name__ == "__main__":
+@app.on_message(filters.reply & filters.text)
+async def handle_filename(client, message):
+    """Handle filename input from user"""
     try:
-        # Create necessary directories
-        os.makedirs(Config.TEMP_DIR, exist_ok=True)
-        
-        # Start bot
-        logger.info("Starting Video Compress Bot...")
-        app.run()
-        
+        user_id = message.from_user.id
+        if user_id in user_settings and user_settings[user_id].get('awaiting_filename'):
+            user_settings[user_id]['filename'] = message.text
+            user_settings[user_id]['awaiting_filename'] = False
+            await FFmpegProcessor.compress_video(message, user_settings[user_id])
     except Exception as e:
-        logger.error(f"Bot Startup Error: {str(e)}")
-    
-    finally:
-        # Cleanup temp directory
-        try:
-            for file in os.listdir(Config.TEMP_DIR):
-                file_path = os.path.join(Config.TEMP_DIR, file)
-                try:
-                    if os.path.isfile(file_path):
-                        os.remove(file_path)
-                except Exception as e:
-                    logger.error(f"Error deleting {file_path}: {str(e)}")
-        except Exception as e:
-            logger.error(f"Cleanup Error: {str(e)}")
+        logger.error(f"Filename Handler Error: {str(e)}")
+        await message.reply_text("❌ Error processing filename.")
