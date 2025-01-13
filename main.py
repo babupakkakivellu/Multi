@@ -61,6 +61,42 @@ def format_size(size):
             return f"{size:.2f} {unit}"
         size /= 1024
 
+# Add these states to track user flow
+class UserState:
+    INITIAL = "initial"
+    DOWNLOADING = "downloading"
+    STREAM_SELECTION = "stream_selection"
+    RENAMING = "renaming"
+    PROCESSING = "processing"
+    UPLOADING = "uploading"
+
+async def handle_callback(client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    data = callback_query.data
+    
+    if data.startswith("init_"):
+        operation = data.split("_")[1]
+        user = user_data[user_id]
+        
+        if operation == "remove_streams":
+            # Start download and show stream selection
+            await start_download_process(client, user)
+        
+        elif operation == "rename":
+            user['awaiting_rename'] = True
+            await callback_query.message.edit_text(
+                "**✏️ Send new filename:**\n"
+                "• Without extension\n"
+                "• /cancel to cancel",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu")
+                ]])
+            )
+        
+        elif operation in ["video", "document"]:
+            user['upload_mode'] = operation
+            await start_download_process(client, user)
+
 def create_progress_bar(current, total, length=20):
     filled = int(length * current // total)
     bar = "━" * filled + "─" * (length - filled)
@@ -270,43 +306,72 @@ async def start_command(client, message: Message):
         "ℹ️ Supported formats: MP4, MKV, AVI, etc."
     )
 
-@app.on_message(filters.video | filters.document)
-async def handle_video(client, message: Message):
+async def start_download_process(client, user_data):
     try:
-        start_time = time.time()
-        status_msg = await message.reply_text("⚡ 𝗜𝗻𝗶𝘁𝗶𝗮𝗹𝗶𝘇𝗶𝗻𝗴...")
+        message = user_data['message']
+        status_msg = user_data['status_msg']
         
+        # Update status message
+        await status_msg.edit_text(
+            "⚡ Initializing Download...\n\n"
+            "Selected Options:\n"
+            f"• Mode: {user_data['upload_mode']}\n"
+            f"• Rename: {'Yes' if user_data['new_filename'] else 'No'}\n"
+            "• Stream Selection: Pending"
+        )
+        
+        # Start download with progress
+        start_time = time.time()
         async def progress_wrapper(current, total):
             await progress(current, total, status_msg, start_time, "download")
         
-        file_path = await message.download(
-            progress=progress_wrapper
-        )
+        file_path = await message.download(progress=progress_wrapper)
+        user_data['file_path'] = file_path
         
-        await status_msg.edit_text("🔍 𝗔𝗻𝗮𝗹𝘆𝘇𝗶𝗻𝗴 𝘀𝘁𝗿𝗲𝗮𝗺𝘀...")
+        # Continue with stream analysis if needed
+        if user_data.get('selected_operation') == 'remove_streams':
+            await analyze_streams(client, user_data)
+            
+    except Exception as e:
+        await status_msg.edit_text(f"❌ **Download failed:** {str(e)}")
+
+@app.on_message(filters.video | filters.document)
+async def handle_video(client, message: Message):
+    try:
+        # Show initial options menu before downloading
+        buttons = [
+            [InlineKeyboardButton("🗑️ Remove Streams", callback_data="init_remove_streams")],
+            [InlineKeyboardButton("✏️ Rename File", callback_data="init_rename")],
+            [
+                InlineKeyboardButton("📹 Video Format", callback_data="init_video"),
+                InlineKeyboardButton("📄 Document Format", callback_data="init_document")
+            ],
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+        ]
         
-        streams = get_streamsinfo(file_path)
-        
-        user_data[message.from_user.id] = {
-            'file_path': file_path,
-            'streams': streams,
-            'selected_streams': set(),
-            'awaiting_rename': False,
-            'new_filename': None
-        }
-        
-        buttons = create_stream_buttons(streams, set())
-        await status_msg.edit_text(
-            "**🎯 𝗦𝗲𝗹𝗲𝗰𝘁 𝘀𝘁𝗿𝗲𝗮𝗺𝘀 𝘁𝗼 𝗿𝗲𝗺𝗼𝘃𝗲:**\n\n"
-            "⬜️ = Keep stream\n"
-            "☑️ = Remove stream\n\n"
-            "_Select all streams you want to remove and press Process._",
+        status_msg = await message.reply_text(
+            "**🎯 Choose Operation:**\n\n"
+            "• Remove Streams - Select streams to remove\n"
+            "• Rename File - Change output filename\n"
+            "• Video/Document Format - Choose upload format\n",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
+        
+        # Store initial message info
+        user_data[message.from_user.id] = {
+            'message': message,
+            'status_msg': status_msg,
+            'selected_operation': None,
+            'file_path': None,
+            'streams': None,
+            'selected_streams': set(),
+            'awaiting_rename': False,
+            'new_filename': None,
+            'upload_mode': None
+        }
+        
     except Exception as e:
-        await status_msg.edit_text(f"❌ **Error:** {str(e)}")
-        if message.from_user.id in user_data:
-            del user_data[message.from_user.id]
+        await message.reply_text(f"❌ **Error:** {str(e)}")
 
 @app.on_message(filters.text & filters.private)
 async def handle_rename(client, message: Message):
