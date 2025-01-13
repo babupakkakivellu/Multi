@@ -1,17 +1,21 @@
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 import os
 import asyncio
-from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+import time
 import ffmpeg
 from datetime import datetime
 
-# Bot configuration
+# Initialize your bot
 app = Client(
-    "video_compress_bot",
+    "compression_bot",
     api_id="16501053",
     api_hash="d8c9b01c863dabacc484c2c06cdd0f6e",
     bot_token="8125717355:AAGEqXec28WfZ5V_wb4bkKoSyTt_slw6x2I"
 )
+
+# Store user settings in a dictionary
+user_settings = {}
 
 # Compression settings
 RESOLUTIONS = {
@@ -21,205 +25,170 @@ RESOLUTIONS = {
     "480p": "854x480",
     "720p": "1280x720",
     "1080p": "1920x1080",
+    "2K": "2560x1440",
     "4K": "3840x2160"
 }
 
 PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"]
-CRF_RANGE = range(15, 31)
-PIXEL_FORMATS = ["yuv420p", "yuv444p"]
+CRF_VALUES = list(range(15, 31))
+PIXEL_FORMATS = ["yuv420p", "yuv422p", "yuv444p"]
 CODECS = ["libx264", "libx265"]
-
-# User session storage
-user_settings = {}
-
-def create_initial_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Compress", callback_data="start_compress")],
-        [InlineKeyboardButton("Cancel", callback_data="cancel")]
-    ])
 
 def create_settings_menu(user_id):
     settings = user_settings.get(user_id, {})
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"Resolution: {settings.get('resolution', '1080p')}", callback_data="set_resolution")],
-        [InlineKeyboardButton(f"Preset: {settings.get('preset', 'medium')}", callback_data="set_preset")],
-        [InlineKeyboardButton(f"CRF: {settings.get('crf', '23')}", callback_data="set_crf")],
-        [InlineKeyboardButton(f"Codec: {settings.get('codec', 'libx264')}", callback_data="set_codec")],
-        [InlineKeyboardButton(f"Pixel Format: {settings.get('pixel_format', 'yuv420p')}", callback_data="set_pixfmt")],
-        [InlineKeyboardButton("Confirm", callback_data="confirm_settings")],
-        [InlineKeyboardButton("Cancel", callback_data="cancel")]
-    ])
+    
+    keyboard = [
+        [InlineKeyboardButton("Resolution: " + settings.get("resolution", "Not Set"), 
+                            callback_data="resolution")],
+        [InlineKeyboardButton("Preset: " + settings.get("preset", "Not Set"), 
+                            callback_data="preset")],
+        [InlineKeyboardButton("CRF: " + str(settings.get("crf", "Not Set")), 
+                            callback_data="crf")],
+        [InlineKeyboardButton("Pixel Format: " + settings.get("pixel_format", "Not Set"), 
+                            callback_data="pixel_format")],
+        [InlineKeyboardButton("Codec: " + settings.get("codec", "Not Set"), 
+                            callback_data="codec")],
+        [InlineKeyboardButton("✅ Confirm", callback_data="confirm_settings"),
+         InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def create_upload_menu():
+    keyboard = [
+        [InlineKeyboardButton("📄 Document", callback_data="upload_document"),
+         InlineKeyboardButton("🎥 Video", callback_data="upload_video")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
 async def progress(current, total, message, action):
     try:
-        percent = current * 100 / total
-        progress_bar = "▓" * int(percent/5) + "░" * (20 - int(percent/5))
-        await message.edit_text(
-            f"{action} Progress:\n"
-            f"[{progress_bar}] {percent:.1f}%\n"
-            f"{current}/{total} bytes"
-        )
+        percentage = current * 100 / total
+        progress_text = f"{action}: {percentage:.1f}%\n" + \
+                       f"[{'=' * int(percentage/5)}{'.' * (20-int(percentage/5))}]"
+        await message.edit_text(progress_text)
     except Exception as e:
-        print(f"Progress update error: {e}")
+        print(e)
+
+async def extract_thumbnail(video_path):
+    thumbnail_path = f"{video_path}_thumb.jpg"
+    probe = await asyncio.create_subprocess_exec(
+        'ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of',
+        'default=noprint_wrappers=1:nokey=1', video_path,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    stdout, _ = await probe.communicate()
+    duration = float(stdout.decode('utf-8').strip())
+    
+    # Extract thumbnail from middle of video
+    time_pos = duration / 2
+    command = [
+        'ffmpeg', '-ss', str(time_pos), '-i', video_path,
+        '-vframes', '1', '-q:v', '2', thumbnail_path
+    ]
+    process = await asyncio.create_subprocess_exec(*command)
+    await process.communicate()
+    
+    return thumbnail_path
 
 @app.on_message(filters.video | filters.document)
-async def handle_video(client: Client, message: Message):
-    try:
-        # Store video info in user session
-        user_settings[message.from_user.id] = {
-            "file_id": message.video.file_id if message.video else message.document.file_id,
-            "file_name": message.video.file_name if message.video else message.document.file_name
-        }
-        
-        await message.reply_text(
-            "Select an action:",
-            reply_markup=create_initial_menu()
-        )
-    except Exception as e:
-        await message.reply_text(f"Error: {str(e)}")
+async def handle_video(client, message):
+    keyboard = [
+        [InlineKeyboardButton("🎯 Compress", callback_data="compress"),
+         InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+    ]
+    await message.reply_text(
+        "Would you like to compress this video?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 @app.on_callback_query()
-async def handle_callback(client: Client, callback: CallbackQuery):
-    try:
-        data = callback.data
-        user_id = callback.from_user.id
-
-        if data == "start_compress":
-            await callback.message.edit_text(
-                "Select compression settings:",
-                reply_markup=create_settings_menu(user_id)
-            )
-
-        elif data.startswith("set_"):
-            # Handle settings selection
-            setting_type = data.split("_")[1]
-            # Show appropriate options based on setting_type
-            # Update user_settings[user_id] with selected value
-            await callback.message.edit_text(
-                "Settings updated",
-                reply_markup=create_settings_menu(user_id)
-            )
-
-        elif data == "confirm_settings":
-            # Show upload format selection
-            markup = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("Upload as Video", callback_data="upload_video"),
-                    InlineKeyboardButton("Upload as Document", callback_data="upload_document")
-                ]
-            ])
-            await callback.message.edit_text("Select upload format:", reply_markup=markup)
-
-        elif data.startswith("upload_"):
-            # Start processing
-            settings = user_settings[user_id]
-            progress_message = await callback.message.edit_text("Starting download...")
-            
-            # Download file
-            file_path = await client.download_media(
-                settings["file_id"],
-                progress=progress,
-                progress_args=(progress_message, "Downloading")
-            )
-
-            # Process with FFmpeg
-            output_path = f"compressed_{settings['file_name']}"
-            await process_video(file_path, output_path, settings, progress_message)
-
-            # Upload processed file
-            await upload_file(client, output_path, callback.message, settings, data == "upload_video")
-
-            # Cleanup
-            os.remove(file_path)
-            os.remove(output_path)
-            
-    except Exception as e:
-        await callback.message.edit_text(f"Error: {str(e)}")
-
-async def process_video(input_path, output_path, settings, message):
-    try:
-        # Construct FFmpeg command based on settings
-        command = [
-            "ffmpeg", "-i", input_path,
-            "-c:v", settings["codec"],
-            "-preset", settings["preset"],
-            "-crf", str(settings["crf"]),
-            "-pix_fmt", settings["pixel_format"],
-            "-vf", f"scale={settings['resolution']}",
-            "-c:a", "aac",
-            output_path
-        ]
-        
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+async def handle_callback(client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    data = callback_query.data
+    
+    if data == "compress":
+        user_settings[user_id] = {}
+        await callback_query.message.edit_text(
+            "Select compression settings:",
+            reply_markup=create_settings_menu(user_id)
         )
-        
-        await message.edit_text("Processing video...")
-        await process.communicate()
-        
-    except Exception as e:
-        await message.edit_text(f"Processing error: {str(e)}")
-
-async def upload_file(client, file_path, message, settings, as_video=True):
-    try:
-        # Extract video metadata
-        probe = ffmpeg.probe(file_path)
-        video_info = next(s for s in probe['streams'] if s['codec_type'] == 'video')
-        
-        # Extract thumbnail
-        thumbnail_path = "thumb.jpg"
-        await extract_thumbnail(file_path, thumbnail_path)
-        
-        if as_video:
-            await client.send_video(
-                message.chat.id,
-                file_path,
-                thumb=thumbnail_path,
-                duration=int(float(probe['format']['duration'])),
-                width=int(video_info['width']),
-                height=int(video_info['height']),
-                caption=settings.get('file_name', 'Compressed video'),
-                progress=progress,
-                progress_args=(message, "Uploading")
-            )
-        else:
-            await client.send_document(
-                message.chat.id,
-                file_path,
-                thumb=thumbnail_path,
-                caption=settings.get('file_name', 'Compressed video'),
-                progress=progress,
-                progress_args=(message, "Uploading")
-            )
-            
-        os.remove(thumbnail_path)
-        
-    except Exception as e:
-        await message.edit_text(f"Upload error: {str(e)}")
-
-async def extract_thumbnail(video_path, thumb_path):
-    try:
-        probe = ffmpeg.probe(video_path)
-        duration = float(probe['format']['duration']) / 2
-        
-        command = [
-            "ffmpeg", "-i", video_path,
-            "-ss", str(duration),
-            "-vframes", "1",
-            thumb_path
-        ]
-        
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+    
+    elif data == "confirm_settings":
+        await callback_query.message.edit_text(
+            "Select upload format:",
+            reply_markup=create_upload_menu()
         )
-        
-        await process.communicate()
-        
-    except Exception as e:
-        print(f"Thumbnail extraction error: {e}")
+    
+    elif data in ["upload_document", "upload_video"]:
+        user_settings[user_id]["upload_type"] = data
+        await callback_query.message.edit_text(
+            "Please send the new filename for the compressed video (or /skip to keep original):"
+        )
+    
+    # Handle other callback queries (resolution, preset, etc.)
+    # Implementation for other settings menus...
+
+async def process_video(message, input_file, output_file, settings):
+    status_msg = await message.reply_text("Starting process...")
+    
+    # Download
+    await message.download(
+        file_name=input_file,
+        progress=progress,
+        progress_args=(status_msg, "Downloading")
+    )
+    
+    # Extract thumbnail
+    thumbnail = await extract_thumbnail(input_file)
+    
+    # Get video information
+    probe = ffmpeg.probe(input_file)
+    video_info = next(s for s in probe['streams'] if s['codec_type'] == 'video')
+    
+    # Prepare FFmpeg command
+    stream = ffmpeg.input(input_file)
+    stream = ffmpeg.output(stream, output_file,
+        vcodec=settings['codec'],
+        preset=settings['preset'],
+        crf=settings['crf'],
+        pix_fmt=settings['pixel_format'],
+        **{'s': RESOLUTIONS[settings['resolution']]}
+    )
+    
+    # Run FFmpeg
+    await status_msg.edit_text("Compressing...")
+    process = await asyncio.create_subprocess_exec(
+        *ffmpeg.compile(stream),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    await process.communicate()
+    
+    # Upload
+    if settings['upload_type'] == 'upload_video':
+        await message.reply_video(
+            output_file,
+            thumb=thumbnail,
+            duration=int(float(video_info['duration'])),
+            width=int(video_info['width']),
+            height=int(video_info['height']),
+            caption=settings.get('filename', os.path.basename(output_file)),
+            progress=progress,
+            progress_args=(status_msg, "Uploading")
+        )
+    else:
+        await message.reply_document(
+            output_file,
+            thumb=thumbnail,
+            caption=settings.get('filename', os.path.basename(output_file)),
+            progress=progress,
+            progress_args=(status_msg, "Uploading")
+        )
+    
+    # Cleanup
+    os.remove(input_file)
+    os.remove(output_file)
+    os.remove(thumbnail)
+    await status_msg.delete()
 
 app.run()
