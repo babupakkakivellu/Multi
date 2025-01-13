@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 
 # Bot Configuration
 class Config:
-    API_ID = "YOUR_API_ID"
-    API_HASH = "YOUR_API_HASH"
-    BOT_TOKEN = "YOUR_BOT_TOKEN"
+    API_ID = "16501053"
+    API_HASH = "d8c9b01c863dabacc484c2c06cdd0f6e"
+    BOT_TOKEN = "8125717355:AAGEqXec28WfZ5V_wb4bkKoSyTt_slw6x2I"
     
     # Compression Settings
     RESOLUTIONS = {
