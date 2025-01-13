@@ -6,6 +6,7 @@ humanize>=4.9.0
 aiofiles>=23.2.1
 aiohttp>=3.9.1
 async-timeout>=4.0.3
+python-ffmpeg
 
 # Optional but recommended for better performance
 uvloop>=0.17.0
