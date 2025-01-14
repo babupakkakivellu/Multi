@@ -94,11 +94,11 @@ class CompressionState:
         self.file_name = None
         self.message = None
         self.task_id = None
-        self.resolution = "720x480"
-        self.preset = "medium"
-        self.crf = "23"
-        self.codec = "libx264"
-        self.pixel_format = "yuv420p"
+        self.resolution = "1280x720"
+        self.preset = "fast"
+        self.crf = "24"
+        self.codec = "libx265"
+        self.pixel_format = "yuv420p10le"
         self.custom_name = None
         self.output_format = "video"
         self.waiting_for_filename = False
