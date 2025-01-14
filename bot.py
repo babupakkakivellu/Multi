@@ -734,4 +734,4 @@ async def start_compression(client: Client, state: CompressionState):
 
 # Start the bot
 print("🤖 Bot is running...")
-app.run
+app.run()
