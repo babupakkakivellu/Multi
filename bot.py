@@ -399,51 +399,91 @@ async def progress_callback(current, total, message, start_time, action):
         print(f"Progress callback error: {str(e)}")
 
 async def start_compression(client: Client, state: CompressionState):
-    progress_msg = await state.message.reply_text("⚙️ **Initializing compression...**")
+    progress_msg = await state.message.reply_text(
+        "⚙️ **Initializing Compression Process**\n\n"
+        "🔄 Preparing your video..."
+    )
     start_time = time.time()
+    input_file = output_file = thumbnail = None
     
     try:
         # Download video
-        await progress_msg.edit_text("📥 **Starting download...**")
+        await progress_msg.edit_text(
+            "📥 **Download Started**\n\n"
+            "Downloading your video file..."
+        )
+        
         input_file = await client.download_media(
             state.file_id,
             progress=progress_callback,
-            progress_args=(progress_msg, start_time, "Downloading")
+            progress_args=(progress_msg, start_time, "Downloading Video")
         )
         
-        # Extract thumbnail
-        await progress_msg.edit_text("🖼️ **Extracting thumbnail...**")
-        thumbnail = f"thumb_{os.path.basename(input_file)}.jpg"
+        if not input_file:
+            raise Exception("Download failed")
+
+        # Get video information
+        await progress_msg.edit_text("🔍 **Analyzing Video...**")
         
         try:
-            duration = float(subprocess.check_output([
-                "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1", input_file
-            ]).decode('utf-8').strip())
+            probe = await asyncio.create_subprocess_exec(
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration:stream=width,height,codec_name",
+                "-of", "json",
+                input_file,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await probe.communicate()
+            video_info = json.loads(stdout.decode('utf-8'))
             
-            subprocess.run([
-                "ffmpeg", "-ss", str(duration/2), "-i", input_file,
-                "-vframes", "1", "-f", "image2", thumbnail
-            ], check=True)
+            duration = float(video_info['format']['duration'])
+            
+            # Extract thumbnail from middle of video
+            await progress_msg.edit_text("🖼️ **Extracting Thumbnail...**")
+            thumbnail = f"thumb_{os.path.basename(input_file)}.jpg"
+            
+            thumb_cmd = [
+                "ffmpeg", "-ss", str(duration/2),
+                "-i", input_file,
+                "-vframes", "1",
+                "-vf", "scale=320:-1",
+                "-q:v", "2",
+                thumbnail
+            ]
+            
+            process = await asyncio.create_subprocess_exec(
+                *thumb_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await process.communicate()
+            
+            if not os.path.exists(thumbnail):
+                print("Thumbnail extraction failed, continuing without thumbnail")
+                thumbnail = None
+            
         except Exception as e:
-            print(f"Thumbnail extraction error: {str(e)}")
+            print(f"Error getting video info: {str(e)}")
+            duration = 0
             thumbnail = None
-        
-        # Start compression
+
+        # Prepare compression
         output_file = f"compressed_{state.custom_name}"
         
         compression_text = (
-            "🎯 **Compressing Video**\n\n"
+            "🎯 **Starting Compression**\n\n"
             f"⚙️ **Settings:**\n"
             f"• Resolution: {state.resolution}\n"
             f"• Preset: {state.preset}\n"
             f"• CRF: {state.crf}\n"
             f"• Codec: {state.codec}\n"
-            f"• Format: {state.pixel_format}\n\n"
-            "Please wait..."
+            f"• Pixel Format: {state.pixel_format}\n\n"
+            "⏳ Compressing... Please wait..."
         )
         await progress_msg.edit_text(compression_text)
-        
+
+        # FFmpeg compression command
         ffmpeg_cmd = [
             "ffmpeg", "-i", input_file,
             "-c:v", state.codec,
@@ -453,50 +493,79 @@ async def start_compression(client: Client, state: CompressionState):
             "-pix_fmt", state.pixel_format,
             "-c:a", "aac",
             "-b:a", "128k",
+            "-movflags", "+faststart",  # Enable fast start for web playback
+            "-y",  # Overwrite output file if exists
             output_file
         ]
-        
+
+        # Start compression process
         process = await asyncio.create_subprocess_exec(
             *ffmpeg_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        
-        await process.communicate()
-        
+
+        # Track FFmpeg progress
+        while True:
+            if process.stderr:
+                line = await process.stderr.readline()
+                if not line:
+                    break
+                line = line.decode('utf-8', errors='replace').strip()
+                
+                # Update progress message periodically with FFmpeg output
+                if 'time=' in line:
+                    try:
+                        time_match = re.search(r'time=(\d+:\d+:\d+.\d+)', line)
+                        if time_match:
+                            current_time = time_match.group(1)
+                            progress_text = (
+                                "🎯 **Compressing Video**\n\n"
+                                f"⏱️ Time: {current_time}\n"
+                                "Please wait..."
+                            )
+                            await progress_msg.edit_text(progress_text)
+                    except Exception as e:
+                        print(f"Progress update error: {str(e)}")
+
+        # Check if compression was successful
         if process.returncode != 0:
-            raise Exception("FFmpeg compression failed")
-        
-        # Upload compressed video
-        await progress_msg.edit_text("📤 **Starting upload...**")
+            raise Exception("Compression failed")
+
+        # Verify output file
+        if not os.path.exists(output_file):
+            raise Exception("Compressed file not found")
+
+        # Get file sizes for comparison
+        original_size = os.path.getsize(input_file)
+        compressed_size = os.path.getsize(output_file)
+
+        # Upload the compressed video
+        await progress_msg.edit_text("📤 **Starting Upload...**")
         
         upload_start_time = time.time()
-        if state.output_format == "video":
-            await client.send_video(
-                state.message.chat.id,
-                output_file,
-                thumb=thumbnail,
-                duration=int(duration) if 'duration' in locals() else 0,
-                caption = (
-            f"🎥 **{state.custom_name}**\n\n"
-            f"🎯 **Compression Info:**\n"
-            f"• Resolution: {state.resolution}\n"
-            f"• Preset: {state.preset}\n"
-            f"• CRF: {state.crf}\n"
-            f"• Codec: {state.codec}\n\n"
-            f"🤖 @YourBotUsername"
-        )
-
+        
         try:
+            caption = (
+                f"🎥 **{state.custom_name}**\n\n"
+                f"🎯 **Compression Info:**\n"
+                f"• Resolution: {state.resolution}\n"
+                f"• Preset: {state.preset}\n"
+                f"• CRF: {state.crf}\n"
+                f"• Original Size: {format_size(original_size)}\n"
+                f"• Compressed Size: {format_size(compressed_size)}\n"
+                f"• Space Saved: {((original_size - compressed_size) / original_size) * 100:.1f}%"
+            )
+
             if state.output_format == "video":
                 await client.send_video(
                     state.message.chat.id,
                     output_file,
                     thumb=thumbnail,
-                    duration=int(duration) if 'duration' in locals() else 0,
+                    duration=int(duration),
                     caption=caption,
                     progress=progress_callback,
-                    progress_args=(progress_msg, upload_start_time, "Uploading")
+                    progress_args=(progress_msg, upload_start_time, "Uploading Video")
                 )
             else:
                 await client.send_document(
@@ -505,21 +574,17 @@ async def start_compression(client: Client, state: CompressionState):
                     thumb=thumbnail,
                     caption=caption,
                     progress=progress_callback,
-                    progress_args=(progress_msg, upload_start_time, "Uploading")
+                    progress_args=(progress_msg, upload_start_time, "Uploading File")
                 )
 
-            # Show completion statistics
-            original_size = os.path.getsize(input_file)
-            compressed_size = os.path.getsize(output_file)
-            compression_ratio = ((original_size - compressed_size) / original_size) * 100
+            # Show completion message
             time_taken = time.time() - start_time
-
             completion_text = (
                 "✅ **Compression Complete!**\n\n"
                 f"📊 **Statistics:**\n"
                 f"• Original Size: {format_size(original_size)}\n"
                 f"• Compressed Size: {format_size(compressed_size)}\n"
-                f"• Space Saved: {compression_ratio:.1f}%\n"
+                f"• Space Saved: {((original_size - compressed_size) / original_size) * 100:.1f}%\n"
                 f"• Time Taken: {time.strftime('%H:%M:%S', time.gmtime(time_taken))}\n\n"
                 "🔄 Send another video to compress again!"
             )
@@ -527,7 +592,7 @@ async def start_compression(client: Client, state: CompressionState):
 
         except FloodWait as e:
             await asyncio.sleep(e.value)
-            raise Exception("Upload failed due to Telegram flood wait")
+            raise Exception(f"Upload delayed due to Telegram limits. Retry after {e.value} seconds")
         
         except Exception as e:
             raise Exception(f"Upload failed: {str(e)}")
@@ -541,14 +606,11 @@ async def start_compression(client: Client, state: CompressionState):
         await progress_msg.edit_text(error_text)
 
     finally:
-        # Cleanup
+        # Cleanup files
         try:
-            if 'input_file' in locals():
-                os.remove(input_file)
-            if 'output_file' in locals():
-                os.remove(output_file)
-            if 'thumbnail' in locals() and thumbnail and os.path.exists(thumbnail):
-                os.remove(thumbnail)
+            for file in [input_file, output_file, thumbnail]:
+                if file and os.path.exists(file):
+                    os.remove(file)
         except Exception as e:
             print(f"Cleanup error: {str(e)}")
         
