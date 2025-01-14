@@ -82,6 +82,7 @@ class CompressionState:
         self.file_id = None
         self.file_name = None
         self.message = None
+        self.task_id = None
         self.resolution = "720x480"
         self.preset = "medium"
         self.crf = "23"
@@ -92,21 +93,60 @@ class CompressionState:
         self.waiting_for_filename = False
         self.start_time = None
 
-user_states = {}
+class CompressionTasks:
+    def __init__(self):
+        self.tasks = {}
+        self.max_tasks = 3
+
+    def add_task(self, user_id, task_id, state):
+        if user_id not in self.tasks:
+            self.tasks[user_id] = {}
+        if len(self.tasks[user_id]) >= self.max_tasks:
+            return False
+        self.tasks[user_id][task_id] = state
+        return True
+
+    def remove_task(self, user_id, task_id):
+        if user_id in self.tasks and task_id in self.tasks[user_id]:
+            del self.tasks[user_id][task_id]
+            if not self.tasks[user_id]:
+                del self.tasks[user_id]
+
+    def get_task(self, user_id, task_id):
+        return self.tasks.get(user_id, {}).get(task_id)
+
+    def get_user_tasks_count(self, user_id):
+        return len(self.tasks.get(user_id, {}))
+
+compression_tasks = CompressionTasks()
 
 app = Client("video_compress_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 def format_size(size):
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if size < 1024:
-            return f"{size:.2f} {unit}"
-        size /= 1024
-    return f"{size:.2f} TB"
+    try:
+        size = float(abs(size))
+        if size == 0:
+            return "0B"
+        units = ['B', 'KB', 'MB', 'GB', 'TB']
+        i = 0
+        while size >= 1024.0 and i < len(units)-1:
+            size /= 1024.0
+            i += 1
+        return f"{size:.2f} {units[i]}"
+    except Exception as e:
+        print(f"Size format error: {str(e)}")
+        return "0B"
 
 def create_progress_bar(current, total, length=20):
-    filled_length = int(length * current // total)
-    bar = '█' * filled_length + '░' * (length - filled_length)
-    return bar
+    try:
+        current = float(current)
+        total = float(total)
+        percentage = min(1, current / total) if total > 0 else 0
+        filled_length = int(length * percentage)
+        return "█" * filled_length + "░" * (length - filled_length)
+    except Exception as e:
+        print(f"Progress bar error: {str(e)}")
+        return "░" * length
 
 def create_theme_menu(task_id):
     buttons = [
@@ -122,14 +162,23 @@ def create_theme_menu(task_id):
     ]
     return InlineKeyboardMarkup(buttons)
 
+def create_custom_menu(task_id):
+    buttons = [
+        [InlineKeyboardButton("📐 Resolution", callback_data=f"custom:{task_id}:resolution")],
+        [InlineKeyboardButton("⚡ Preset", callback_data=f"custom:{task_id}:preset")],
+        [InlineKeyboardButton("🎯 Quality (CRF)", callback_data=f"custom:{task_id}:crf")],
+        [InlineKeyboardButton("✅ Confirm Settings", callback_data=f"custom:{task_id}:confirm")],
+        [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{task_id}")]
+    ]
+    return InlineKeyboardMarkup(buttons)
 
-async def show_format_selection(message, theme_name):
+async def show_format_selection(message, theme_name, task_id):
     buttons = [
         [
-            InlineKeyboardButton("📹 Video", callback_data="format:video"),
-            InlineKeyboardButton("📄 Document", callback_data="format:document")
+            InlineKeyboardButton("📹 Video", callback_data=f"format:{task_id}:video"),
+            InlineKeyboardButton("📄 Document", callback_data=f"format:{task_id}:document")
         ],
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+        [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{task_id}")]
     ]
     await message.edit_text(
         f"🎯 **Selected: {theme_name}**\n\n"
@@ -163,43 +212,12 @@ async def start_command(client, message):
         print(f"Start command error: {str(e)}")
         await message.reply_text("❌ An error occurred. Please try again.")
 
-class CompressionTasks:
-    def __init__(self):
-        self.tasks = {}  # Dictionary to store multiple tasks per user
-        self.max_tasks = 3  # Maximum concurrent tasks per user
-
-    def add_task(self, user_id, task_id, state):
-        if user_id not in self.tasks:
-            self.tasks[user_id] = {}
-        
-        if len(self.tasks[user_id]) >= self.max_tasks:
-            return False
-            
-        self.tasks[user_id][task_id] = state
-        return True
-
-    def remove_task(self, user_id, task_id):
-        if user_id in self.tasks and task_id in self.tasks[user_id]:
-            del self.tasks[user_id][task_id]
-            if not self.tasks[user_id]:
-                del self.tasks[user_id]
-
-    def get_task(self, user_id, task_id):
-        return self.tasks.get(user_id, {}).get(task_id)
-
-    def get_user_tasks_count(self, user_id):
-        return len(self.tasks.get(user_id, {}))
-
-# Replace user_states with compression_tasks
-compression_tasks = CompressionTasks()
-
 @app.on_message(filters.video | filters.document)
 async def handle_video(client: Client, message: Message):
     try:
         user_id = message.from_user.id
         task_id = str(int(time.time()))  # Unique task ID based on timestamp
         
-        # Check if user has reached maximum tasks
         if compression_tasks.get_user_tasks_count(user_id) >= compression_tasks.max_tasks:
             await message.reply_text(
                 f"⚠️ Maximum concurrent tasks ({compression_tasks.max_tasks}) reached.\n"
@@ -234,7 +252,6 @@ async def handle_video(client: Client, message: Message):
         state.message = message
         state.task_id = task_id
         
-        # Add task to compression tasks
         if compression_tasks.add_task(user_id, task_id, state):
             info_text = (
                 f"🎥 **Task ID:** `{task_id}`\n\n"
@@ -257,6 +274,22 @@ async def handle_video(client: Client, message: Message):
         error_text = f"❌ Error processing video: {str(e)}"
         print(error_text)
         await message.reply_text(error_text)
+
+@app.on_message(filters.command("cancel"))
+async def cancel_command(client, message):
+    user_id = message.from_user.id
+    if user_id in compression_tasks.tasks:
+        for task_id in list(compression_tasks.tasks[user_id].keys()):
+            compression_tasks.remove_task(user_id, task_id)
+        await message.reply_text(
+            "✅ **All Compression Tasks Cancelled**\n\n"
+            "Send another video to start again!"
+        )
+    else:
+        await message.reply_text(
+            "❌ **No Active Compression**\n\n"
+            "Send a video to start compression!"
+        )
 
 @app.on_callback_query()
 async def handle_callback(client: Client, callback: CallbackQuery):
@@ -379,39 +412,48 @@ async def handle_callback(client: Client, callback: CallbackQuery):
         error_text = f"❌ Callback error: {str(e)}"
         print(error_text)
         await callback.answer(error_text, show_alert=True)
-        compression_tasks.remove_task(user_id, task_id)
+        if user_id in compression_tasks.tasks and task_id in compression_tasks.tasks[user_id]:
+            compression_tasks.remove_task(user_id, task_id)
 
 @app.on_message(filters.text & filters.private)
 async def handle_filename(client: Client, message: Message):
     try:
         user_id = message.from_user.id
         
-        if user_id not in user_states or not user_states[user_id].waiting_for_filename:
+        # Find the user's task that's waiting for filename
+        user_tasks = compression_tasks.tasks.get(user_id, {})
+        active_task = None
+        task_id = None
+        
+        for tid, task in user_tasks.items():
+            if task.waiting_for_filename:
+                active_task = task
+                task_id = tid
+                break
+        
+        if not active_task:
             return
         
-        state = user_states[user_id]
-        
         if message.text == "/skip":
-            state.custom_name = state.file_name
+            active_task.custom_name = active_task.file_name
         else:
-            state.custom_name = message.text
-            if not any(state.custom_name.lower().endswith(ext) 
+            active_task.custom_name = message.text
+            if not any(active_task.custom_name.lower().endswith(ext) 
                       for ext in ['.mp4', '.mkv', '.avi', '.mov']):
-                state.custom_name += '.mp4'
+                active_task.custom_name += '.mp4'
         
         await message.reply_text(
             "🎯 **Starting Compression Process**\n\n"
             "Please wait while I process your video..."
         )
-        await start_compression(client, state)
-    
+        await start_compression(client, active_task)
+        
     except Exception as e:
         error_text = f"❌ Error processing filename: {str(e)}"
         print(error_text)
         await message.reply_text(error_text)
-        if user_id in user_states:
-            del user_states[user_id]
-
+        if task_id:
+            compression_tasks.remove_task(user_id, task_id)
 
 async def progress_callback(current, total, message, start_time, action):
     try:
@@ -428,7 +470,7 @@ async def progress_callback(current, total, message, start_time, action):
             message.actual_total = total
 
         # Use stored actual total size
-        total = message.actual_total
+        total = message.actual_total or current
 
         # Calculate progress metrics
         progress = min(100, (current * 100) / total) if total else 0
@@ -440,7 +482,7 @@ async def progress_callback(current, total, message, start_time, action):
         
         # Format sizes with actual values
         current_size = format_size(current)
-        total_size = format_size(total)  # Using actual total size
+        total_size = format_size(total)
         speed_text = format_size(speed)
 
         text = (
@@ -460,67 +502,6 @@ async def progress_callback(current, total, message, start_time, action):
             
     except Exception as e:
         print(f"Progress callback error: {str(e)}")
-
-def create_progress_bar(current, total, length=20):
-    try:
-        # Ensure we have valid numbers
-        current = float(current)
-        total = float(total)
-        
-        # Calculate the progress
-        if total <= 0:
-            percentage = 0
-        else:
-            percentage = min(1, current / total)
-        
-        # Create the progress bar
-        filled_length = int(length * percentage)
-        filled = "█" * filled_length
-        empty = "░" * (length - filled_length)
-        
-        return filled + empty
-    
-    except Exception as e:
-        print(f"Progress bar error: {str(e)}")
-        return "░" * length
-
-def format_size(size):
-    try:
-        # Convert to float and handle negative values
-        size = float(abs(size))
-        
-        if size == 0:
-            return "0B"
-            
-        # Size units and their threshold
-        units = {
-            'B': 1,
-            'KB': 1024,
-            'MB': 1024 * 1024,
-            'GB': 1024 * 1024 * 1024,
-            'TB': 1024 * 1024 * 1024 * 1024
-        }
-        
-        # Find the appropriate unit
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if size < units[unit] * 1024.0 or unit == 'TB':
-                if unit == 'B':
-                    return f"{int(size)} {unit}"
-                return f"{size/units[unit]:.2f} {unit}"
-                
-    except Exception as e:
-        print(f"Size format error: {str(e)}")
-        return "0B"
-
-def format_size(size):
-    if size == 0:
-        return "0B"
-    units = ['B', 'KB', 'MB', 'GB', 'TB']
-    index = 0
-    while size >= 1024 and index < len(units) - 1:
-        size /= 1024
-        index += 1
-    return f"{size:.2f} {units[index]}"
 
 async def start_compression(client: Client, state: CompressionState):
     progress_msg = await state.message.reply_text(
@@ -622,8 +603,8 @@ async def start_compression(client: Client, state: CompressionState):
             "-pix_fmt", state.pixel_format,
             "-c:a", "aac",
             "-b:a", "128k",
-            "-movflags", "+faststart",  # Enable fast start for web playback
-            "-y",  # Overwrite output file if exists
+            "-movflags", "+faststart",
+            "-y",
             output_file
         ]
 
@@ -631,22 +612,8 @@ async def start_compression(client: Client, state: CompressionState):
         process = await asyncio.create_subprocess_exec(
             *ffmpeg_cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=1024 * 1024  # Increase buffer limit to 1MB
+            stderr=asyncio.subprocess.PIPE
         )
-
-        # Track FFmpeg progress with larger chunks
-        async def read_stream(stream):
-            output = []
-            try:
-                while True:
-                    line = await stream.readline()
-                    if not line:
-                        break
-                    output.append(line.decode('utf-8', errors='replace').strip())
-            except ValueError as e:
-                print(f"Stream reading error: {str(e)}")
-            return output
 
         # Process FFmpeg output
         while True:
@@ -655,36 +622,27 @@ async def start_compression(client: Client, state: CompressionState):
                 if not stderr_line:
                     break
                 
-                try:
-                    line = stderr_line.decode('utf-8', errors='replace').strip()
-                    
-                    # Update progress message with FFmpeg output
-                    if 'time=' in line:
-                        time_match = re.search(r'time=(\d+:\d+:\d+.\d+)', line)
-                        fps_match = re.search(r'fps=\s*(\d+)', line)
-                        speed_match = re.search(r'speed=\s*(\d+\.?\d*x)', line)
-                        
-                        progress_text = (
-                            "🎯 **Compressing Video**\n\n"
-                            f"⏱️ Time: {time_match.group(1) if time_match else 'N/A'}\n"
-                            f"🎞️ FPS: {fps_match.group(1) if fps_match else 'N/A'}\n"
-                            f"⚡ Speed: {speed_match.group(1) if speed_match else 'N/A'}\n\n"
-                            "Please wait..."
-                        )
-                        try:
-                            await progress_msg.edit_text(progress_text)
-                        except Exception as e:
-                            print(f"Progress update error: {str(e)}")
+                line = stderr_line.decode('utf-8', errors='replace').strip()
                 
-                except Exception as e:
-                    print(f"Line processing error: {str(e)}")
-                    continue
-            
-            except ValueError as e:
-                print(f"Stream reading error: {str(e)}")
-                continue
+                if 'time=' in line:
+                    time_match = re.search(r'time=(\d+:\d+:\d+.\d+)', line)
+                    fps_match = re.search(r'fps=\s*(\d+)', line)
+                    speed_match = re.search(r'speed=\s*(\d+\.?\d*x)', line)
+                    
+                    progress_text = (
+                        "🎯 **Compressing Video**\n\n"
+                        f"⏱️ Time: {time_match.group(1) if time_match else 'N/A'}\n"
+                        f"🎞️ FPS: {fps_match.group(1) if fps_match else 'N/A'}\n"
+                        f"⚡ Speed: {speed_match.group(1) if speed_match else 'N/A'}\n\n"
+                        "Please wait..."
+                    )
+                    try:
+                        await progress_msg.edit_text(progress_text)
+                    except Exception as e:
+                        print(f"Progress update error: {str(e)}")
+                
             except Exception as e:
-                print(f"Unknown error: {str(e)}")
+                print(f"FFmpeg output processing error: {str(e)}")
                 continue
 
         # Wait for process to complete
@@ -770,27 +728,10 @@ async def start_compression(client: Client, state: CompressionState):
         except Exception as e:
             print(f"Cleanup error: {str(e)}")
         
-        # Clear user state
-        if state.message.from_user.id in user_states:
-            del user_states[state.message.from_user.id]
-
-
-# Add command handlers
-@app.on_message(filters.command("cancel"))
-async def cancel_command(client, message):
-    user_id = message.from_user.id
-    if user_id in user_states:
-        del user_states[user_id]
-        await message.reply_text(
-            "✅ **Compression Cancelled**\n\n"
-            "Send another video to start again!"
-        )
-    else:
-        await message.reply_text(
-            "❌ **No Active Compression**\n\n"
-            "Send a video to start compression!"
-        )
+        # Clear task
+        if state.message.from_user.id in compression_tasks.tasks:
+            compression_tasks.remove_task(state.message.from_user.id, state.task_id)
 
 # Start the bot
 print("🤖 Bot is running...")
-app.run()
+app.run
