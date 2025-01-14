@@ -163,21 +163,26 @@ def format_size(size):
 
 async def progress_callback(current, total, message, start_time, action):
     try:
+        # Handle cases where total is 0 or None
+        if not total or total <= 0:
+            await message.edit_text("❌ Invalid file size. Progress cannot be calculated.")
+            return
+
         now = time.time()
         elapsed_time = now - start_time
 
         # Calculate percentage
-        percentage = (current / total) * 100 if total else 0
+        percentage = (current / total) * 100
         percentage = round(percentage, 1)
 
         # Calculate speed and ETA
         speed = current / elapsed_time if elapsed_time > 0 else 0
-        eta = (total - current) / speed if speed > 0 else 0
+        eta = (total - current) / speed if speed > 0 else float('inf')
 
-        # Progress bar
+        # Format progress bar
         progress_bar = f"[{'█' * int(percentage // 5):<20}]"
 
-        # Create status message
+        # Create status text
         status_text = (
             f"⏳ **{action}**\n"
             f"{progress_bar} {percentage:.1f}%\n"
@@ -186,13 +191,14 @@ async def progress_callback(current, total, message, start_time, action):
             f"📊 **Total:** {format_size(total)} | **Done:** {format_size(current)}"
         )
 
-        # Update message only if significant change (avoid spamming)
+        # Update message only if there’s a meaningful change
         if not hasattr(message, 'last_percentage') or abs(message.last_percentage - percentage) >= 1:
             message.last_percentage = percentage
             await message.edit_text(status_text)
 
     except Exception as e:
-        print(f"Progress callback error: {str(e)}")
+        print(f"Error in progress_callback: {str(e)}")
+
 
 # UI Components
 def create_theme_menu(task_id):
