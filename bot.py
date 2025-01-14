@@ -19,6 +19,14 @@ API_ID = "16501053"
 API_HASH = "d8c9b01c863dabacc484c2c06cdd0f6e" 
 BOT_TOKEN = "8125717355:AAGEqXec28WfZ5V_wb4bkKoSyTt_slw6x2I"
 
+# Initialize and start the bot
+app = Client(
+    "video_compress_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
+
 # Compression Settings
 RESOLUTIONS = {
     "144p 📱": "256x144",
@@ -667,13 +675,7 @@ async def start_compression(client: Client, state: CompressionState):
         if state.message.from_user.id in compression_tasks.tasks:
             compression_tasks.remove_task(state.message.from_user.id, state.task_id)
 
-# Initialize and start the bot
-app = Client(
-    "video_compress_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
-)
+
 
 print("🤖 Bot is running...")
 app.run()
