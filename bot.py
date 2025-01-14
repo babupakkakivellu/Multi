@@ -463,27 +463,32 @@ async def handle_filename(client: Client, message: Message):
 async def progress_callback(current, total, message, start_time, action):
     try:
         now = time.time()
-        elapsed_time = max(1, now - start_time)  # Prevent division by zero
+        elapsed_time = max(1, now - start_time)
         
         # Update only every 2 seconds to avoid FloodWait
         if hasattr(message, 'last_update') and (now - message.last_update) < 2:
             return
         message.last_update = now
 
+        # Ensure both current and total are valid numbers
+        current = float(current)
+        total = float(total) if total else current
+        
         # Calculate progress metrics
-        percentage = min(100, (current * 100) / total) if total else 0
-        speed = current / elapsed_time  # bytes per second
+        percentage = min(100, (current * 100) / total) if total > 0 else 0
+        speed = current / elapsed_time
         
-        # Calculate ETA
-        if speed > 0:
-            eta = (total - current) / speed
-        else:
-            eta = 0
-
-        # Create progress bar with percentage
-        progress_bar = create_progress_bar(current, total)
+        # Calculate ETA (more accurate)
+        remaining_bytes = total - current
+        eta = remaining_bytes / speed if speed > 0 else 0
+        eta = min(eta, 86400)  # Cap ETA at 24 hours
         
-        # Format sizes and speed
+        # Create progress bar
+        bar_length = 20
+        filled_length = int(bar_length * percentage / 100)
+        bar = '█' * filled_length + '░' * (bar_length - filled_length)
+        
+        # Format sizes
         current_size = format_size(current)
         total_size = format_size(total)
         speed_text = format_size(speed)
@@ -492,14 +497,13 @@ async def progress_callback(current, total, message, start_time, action):
         elapsed = time.strftime('%H:%M:%S', time.gmtime(elapsed_time))
         eta_time = time.strftime('%H:%M:%S', time.gmtime(eta))
 
-        # Create progress text with clear formatting
         text = (
             f"**{action}**\n\n"
-            f"📊 **Progress:** {progress_bar}\n\n"
-            f"🚀 **Speed:** `{speed_text}/s`\n"
-            f"⏱️ **Elapsed:** `{elapsed}`\n"
-            f"⏳ **ETA:** `{eta_time}`\n"
-            f"📦 **Size:** `{current_size} / {total_size}`"
+            f"📊 **Progress**: [{bar}] {percentage:.1f}%\n\n"
+            f"💾 **Size**: {current_size} / {total_size}\n"
+            f"🚀 **Speed**: {speed_text}/s\n"
+            f"⏱️ **Elapsed**: {elapsed}\n"
+            f"⏳ **ETA**: {eta_time}"
         )
         
         try:
