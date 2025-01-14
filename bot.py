@@ -616,11 +616,7 @@ async def start_compression(client: Client, state: CompressionState):
         
         try:
             caption = (
-                f"🎥 **{state.custom_name}**\n\n"
-                f"📊 **Compression Results:**\n"
-                f"• Original: {format_size(original_size)}\n"
-                f"• Compressed: {format_size(compressed_size)}\n"
-                f"• Saved: {((original_size - compressed_size) / original_size) * 100:.1f}%"
+                f" **{state.custom_name}**\n"
             )
 
             if state.output_format == "video":
