@@ -49,12 +49,19 @@ PRESETS = {
 }
 
 CRF_VALUES = {
-    "15 - Visually Lossless 🎯": "15",
-    "18 - High Quality 🎥": "18",
+    "15": "15",
+    "16": "16",
+    "17": "17",
+    "18": "18",
+    "19": "19",
+    "20": "20",
+    "21": "21",
+    "22": "22",
     "23": "23",
     "24": "24",
     "25": "25",
-    "26": "26"
+    "26": "26",
+    "27": "27"
 }
 
 THEMES = {
@@ -157,25 +164,11 @@ async def progress_callback(current, total, message, start_time, action):
             return
         message.last_update = now
 
-        # Calculate progress metrics
+        # Calculate progress percentage
         percentage = (current / total) * 100 if total else 0
-        speed = current / elapsed_time if elapsed_time else 0
-        eta = (total - current) / speed if speed > 0 else 0
         
-        # Create progress bar
-        bar_length = 20
-        filled_length = int(percentage / 100 * bar_length)
-        bar = '█' * filled_length + '░' * (bar_length - filled_length)
-        
-        # Format status text with emojis and progress information
-        status_text = (
-            f"⏳ **{action}**\n\n"
-            f"[{bar}] {percentage:.1f}%\n\n"
-            f"💾 **Size:** {format_size(current)} / {format_size(total)}\n"
-            f"⚡ **Speed:** {format_size(speed)}/s\n"
-            f"⏱️ **Elapsed:** {time.strftime('%H:%M:%S', time.gmtime(elapsed_time))}\n"
-            f"⌛ **ETA:** {time.strftime('%H:%M:%S', time.gmtime(eta))}"
-        )
+        # Simple status text with just the percentage
+        status_text = f"⏳ **{action}:** {percentage:.1f}%"
 
         try:
             await message.edit_text(status_text)
@@ -343,22 +336,6 @@ async def handle_video(client: Client, message: Message):
         print(error_text)
         await message.reply_text(error_text)
 
-@app.on_message(filters.command("cancel"))
-async def cancel_command(client, message):
-    user_id = message.from_user.id
-    if user_id in compression_tasks.tasks:
-        for task_id in list(compression_tasks.tasks[user_id].keys()):
-            compression_tasks.remove_task(user_id, task_id)
-        await message.reply_text(
-            "✅ **All Compression Tasks Cancelled**\n\n"
-            "Send another video to start again!"
-        )
-    else:
-        await message.reply_text(
-            "❌ **No Active Compression**\n\n"
-            "Send a video to start compression!"
-        )
-
 @app.on_callback_query()
 async def handle_callback(client: Client, callback: CallbackQuery):
     try:
@@ -465,8 +442,6 @@ async def handle_callback(client: Client, callback: CallbackQuery):
 async def handle_filename(client: Client, message: Message):
     try:
         user_id = message.from_user.id
-        
-        # Find the user's task that's waiting for filename
         user_tasks = compression_tasks.tasks.get(user_id, {})
         active_task = None
         task_id = None
@@ -509,7 +484,7 @@ async def start_compression(client: Client, state: CompressionState):
     try:
         # Download video
         try:
-            await progress_msg.edit_text("📥 **Downloading...**")
+            await progress_msg.edit_text("📥 **Downloading: 0%**")
             input_file = await client.download_media(
                 state.file_id,
                 progress=progress_callback,
@@ -527,10 +502,9 @@ async def start_compression(client: Client, state: CompressionState):
             raise Exception(f"Download failed: {str(e)}")
 
         # Get video information and create thumbnail
-        await progress_msg.edit_text("🔍 **Analyzing...**")
+        await progress_msg.edit_text("🔍 **Analyzing Video...**")
         
         try:
-            # Get video information using FFprobe
             probe = await asyncio.create_subprocess_exec(
                 "ffprobe", "-v", "error",
                 "-show_entries", "format=duration:stream=width,height,codec_name",
@@ -545,7 +519,6 @@ async def start_compression(client: Client, state: CompressionState):
             duration = float(video_info['format']['duration'])
             
             # Extract thumbnail
-            await progress_msg.edit_text("🖼️ **Processing thumbnail...**")
             thumbnail = f"thumb_{os.path.basename(input_file)}.jpg"
             
             thumb_cmd = [
@@ -575,9 +548,8 @@ async def start_compression(client: Client, state: CompressionState):
 
         # Start compression
         output_file = f"compressed_{state.custom_name}"
-        await progress_msg.edit_text("🎯 **Compressing...**")
+        await progress_msg.edit_text("🎯 **Compressing: 0%**")
 
-        # FFmpeg compression command
         ffmpeg_cmd = [
             "ffmpeg", "-i", input_file,
             "-hide_banner", "-ignore_unknown",
@@ -595,7 +567,6 @@ async def start_compression(client: Client, state: CompressionState):
             output_file
         ]
 
-        # Start compression process
         process = await asyncio.create_subprocess_exec(
             *ffmpeg_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -607,17 +578,13 @@ async def start_compression(client: Client, state: CompressionState):
         if not os.path.exists(output_file):
             raise Exception("Compression failed")
 
-        # Get file sizes for comparison
         original_size = os.path.getsize(input_file)
         compressed_size = os.path.getsize(output_file)
 
-        # Upload the compressed video
-        await progress_msg.edit_text("📤 **Uploading...**")
+        await progress_msg.edit_text("📤 **Uploading: 0%**")
         
         try:
-            caption = (
-                f" **{state.custom_name}**\n"
-            )
+            caption = f"**{state.custom_name}**\n"
 
             if state.output_format == "video":
                 await client.send_video(
@@ -671,12 +638,26 @@ async def start_compression(client: Client, state: CompressionState):
                     os.remove(file)
         except Exception as e:
             print(f"Cleanup error: {str(e)}")
-        
-        # Clear task
+
+@app.on_message(filters.command("cancel"))
+async def cancel_command(client, message):
+    user_id = message.from_user.id
+    if user_id in compression_tasks.tasks:
+        for task_id in list(compression_tasks.tasks[user_id].keys()):
+            compression_tasks.remove_task(user_id, task_id)
+        await message.reply_text(
+            "✅ **All Compression Tasks Cancelled**\n\n"
+            "Send another video to start again!"
+        )
+    else:
+        await message.reply_text(
+            "❌ **No Active Compression**\n\n"
+            "Send a video to start compression!"
+        )
+
+# Clear task after compression
         if state.message.from_user.id in compression_tasks.tasks:
             compression_tasks.remove_task(state.message.from_user.id, state.task_id)
-
-
 
 print("🤖 Bot is running...")
 app.run()
