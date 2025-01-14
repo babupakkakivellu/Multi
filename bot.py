@@ -387,48 +387,98 @@ async def handle_filename(client: Client, message: Message):
 async def progress_callback(current, total, message, start_time, action):
     try:
         now = time.time()
-        elapsed_time = max(0.1, now - start_time)  # Prevent division by zero
+        elapsed_time = max(0.1, now - start_time)
         
         # Only update every 2 seconds to avoid FloodWait
         if hasattr(message, 'last_update') and (now - message.last_update) < 2:
             return
         message.last_update = now
 
-        # Calculate progress metrics with safety checks
-        if total == 0:
-            progress = 0
-            speed = 0
-            eta = 0
-        else:
-            progress = min(100, (current * 100) / total)
-            speed = current / elapsed_time
-            eta = (total - current) / speed if speed > 0 else 0
+        # Fix for total being None or 0
+        if not total or total == 0:
+            total = current if current > 0 else 1
 
+        # Calculate progress metrics
+        progress = min(100, (current * 100) / total)
+        speed = current / elapsed_time
+        eta = (total - current) / speed if speed > 0 else 0
+
+        # Create progress bar
         progress_bar = create_progress_bar(current, total)
         
+        # Format sizes properly
+        current_size = format_size(current)
+        total_size = format_size(total)
+        speed_text = format_size(speed)
+
         text = (
             f"**{action}**\n\n"
             f"💫 **Progress:** {progress:.1f}%\n"
             f"{progress_bar}\n"
-            f"⚡ **Speed:** {format_size(speed)}/s\n"
+            f"⚡ **Speed:** {speed_text}/s\n"
             f"⏱️ **Elapsed:** {time.strftime('%H:%M:%S', time.gmtime(elapsed_time))}\n"
             f"⏳ **ETA:** {time.strftime('%H:%M:%S', time.gmtime(eta))}\n"
-            f"📊 **Size:** {format_size(current)} / {format_size(total)}"
+            f"📊 **Size:** {current_size} / {total_size}"
         )
         
-        await message.edit_text(text)
+        try:
+            await message.edit_text(text)
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
         
-    except FloodWait as e:
-        print(f"FloodWait: waiting for {e.value} seconds")
-        await asyncio.sleep(e.value)
     except Exception as e:
         print(f"Progress callback error: {str(e)}")
 
 def create_progress_bar(current, total, length=20):
-    if total == 0:
+    try:
+        # Ensure we have valid numbers
+        current = float(current)
+        total = float(total)
+        
+        # Calculate the progress
+        if total <= 0:
+            percentage = 0
+        else:
+            percentage = min(1, current / total)
+        
+        # Create the progress bar
+        filled_length = int(length * percentage)
+        filled = "█" * filled_length
+        empty = "░" * (length - filled_length)
+        
+        return filled + empty
+    
+    except Exception as e:
+        print(f"Progress bar error: {str(e)}")
         return "░" * length
-    filled_length = int(length * current // max(1, total))
-    return "█" * filled_length + "░" * (length - filled_length)
+
+def format_size(size):
+    try:
+        # Convert to float and handle negative values
+        size = float(abs(size))
+        
+        if size == 0:
+            return "0B"
+            
+        # Size units and their threshold
+        units = {
+            'B': 1,
+            'KB': 1024,
+            'MB': 1024 * 1024,
+            'GB': 1024 * 1024 * 1024,
+            'TB': 1024 * 1024 * 1024 * 1024
+        }
+        
+        # Find the appropriate unit
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size < units[unit] * 1024.0 or unit == 'TB':
+                if unit == 'B':
+                    return f"{int(size)} {unit}"
+                return f"{size/units[unit]:.2f} {unit}"
+                
+    except Exception as e:
+        print(f"Size format error: {str(e)}")
+        return "0B"
 
 def format_size(size):
     if size == 0:
