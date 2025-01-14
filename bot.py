@@ -123,7 +123,6 @@ compression_tasks = CompressionTasks()
 app = Client("video_compress_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 def format_size(size):
-    """Format size in bytes to human readable format"""
     try:
         size = float(abs(size))
         if size == 0:
@@ -133,11 +132,7 @@ def format_size(size):
         while size >= 1024.0 and i < len(units)-1:
             size /= 1024.0
             i += 1
-        # Use 2 decimal places for MB and above, 0 for B and KB
-        if i >= 2:
-            return f"{size:.2f} {units[i]}"
-        else:
-            return f"{int(size)} {units[i]}"
+        return f"{size:.2f} {units[i]}"
     except Exception as e:
         print(f"Size format error: {str(e)}")
         return "0B"
@@ -154,7 +149,7 @@ def create_progress_bar(current, total, length=20):
     except Exception as e:
         print(f"Progress bar error: {str(e)}")
         return "░" * length
-        
+
 def create_theme_menu(task_id):
     buttons = [
         [
