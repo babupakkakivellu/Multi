@@ -254,6 +254,19 @@ async def show_settings_summary(message, state, task_id):
     )
     await message.edit_text(text, reply_markup=create_custom_menu(task_id))
 
+def authorized_users_only(func):
+    async def wrapper(client, message):
+        user_id = message.from_user.id
+        if user_id not in AUTHORIZED_USERS:
+            await message.reply_text(
+                "⚠️ **Unauthorized Access**\n\n"
+                "You are not authorized to use this bot."
+                "Contact :- @Blaster_ONFR For Access."
+            )
+            return
+        return await func(client, message)
+    return wrapper
+
 # Message Handlers
 @app.on_message(filters.command("start"))
 @authorized_users_only
@@ -281,6 +294,7 @@ async def start_command(client, message):
         await message.reply_text("❌ An error occurred. Please try again.")
 
 @app.on_message(filters.video | filters.document)
+@authorized_users_only
 async def handle_video(client: Client, message: Message):
     try:
         user_id = message.from_user.id
@@ -444,18 +458,6 @@ async def handle_callback(client: Client, callback: CallbackQuery):
         if user_id in compression_tasks.tasks and task_id in compression_tasks.tasks[user_id]:
             compression_tasks.remove_task(user_id, task_id)
 
-def authorized_users_only(func):
-    async def wrapper(client, message):
-        user_id = message.from_user.id
-        if user_id not in AUTHORIZED_USERS:
-            await message.reply_text(
-                "⚠️ **Unauthorized Access**\n\n"
-                "You are not authorized to use this bot."
-                "Contact :- @Blaster_ONFR For Access."
-            )
-            return
-        return await func(client, message)
-    return wrapper
 
 @app.on_message(filters.text & filters.private)
 async def handle_filename(client: Client, message: Message):
@@ -659,6 +661,7 @@ async def start_compression(client: Client, state: CompressionState):
             print(f"Cleanup error: {str(e)}")
 
 @app.on_message(filters.command("cancel"))
+@authorized_users_only
 async def cancel_command(client, message):
     user_id = message.from_user.id
     if user_id in compression_tasks.tasks:
