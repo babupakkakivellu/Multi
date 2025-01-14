@@ -519,44 +519,66 @@ async def start_compression(client: Client, state: CompressionState):
         process = await asyncio.create_subprocess_exec(
             *ffmpeg_cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
+            limit=1024 * 1024  # Increase buffer limit to 1MB
         )
 
-        # Track FFmpeg progress
+        # Track FFmpeg progress with larger chunks
+        async def read_stream(stream):
+            output = []
+            try:
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    output.append(line.decode('utf-8', errors='replace').strip())
+            except ValueError as e:
+                print(f"Stream reading error: {str(e)}")
+            return output
+
+        # Process FFmpeg output
         while True:
-            if process.stderr:
-                line = await process.stderr.readline()
-                if not line:
+            try:
+                stderr_line = await process.stderr.readline()
+                if not stderr_line:
                     break
-                line = line.decode('utf-8', errors='replace').strip()
                 
-                # Update progress message with FFmpeg output
-                if 'time=' in line:
-                    try:
+                try:
+                    line = stderr_line.decode('utf-8', errors='replace').strip()
+                    
+                    # Update progress message with FFmpeg output
+                    if 'time=' in line:
                         time_match = re.search(r'time=(\d+:\d+:\d+.\d+)', line)
-                        if time_match:
-                            current_time = time_match.group(1)
-                            fps_match = re.search(r'fps=\s*(\d+)', line)
-                            speed_match = re.search(r'speed=\s*(\d+\.?\d*x)', line)
-                            
-                            progress_text = (
-                                "🎯 **Compressing Video**\n\n"
-                                f"⏱️ Time: {current_time}\n"
-                                f"🎞️ FPS: {fps_match.group(1) if fps_match else 'N/A'}\n"
-                                f"⚡ Speed: {speed_match.group(1) if speed_match else 'N/A'}\n\n"
-                                "Please wait..."
-                            )
+                        fps_match = re.search(r'fps=\s*(\d+)', line)
+                        speed_match = re.search(r'speed=\s*(\d+\.?\d*x)', line)
+                        
+                        progress_text = (
+                            "🎯 **Compressing Video**\n\n"
+                            f"⏱️ Time: {time_match.group(1) if time_match else 'N/A'}\n"
+                            f"🎞️ FPS: {fps_match.group(1) if fps_match else 'N/A'}\n"
+                            f"⚡ Speed: {speed_match.group(1) if speed_match else 'N/A'}\n\n"
+                            "Please wait..."
+                        )
+                        try:
                             await progress_msg.edit_text(progress_text)
-                    except Exception as e:
-                        print(f"Progress update error: {str(e)}")
+                        except Exception as e:
+                            print(f"Progress update error: {str(e)}")
+                
+                except Exception as e:
+                    print(f"Line processing error: {str(e)}")
+                    continue
+            
+            except ValueError as e:
+                print(f"Stream reading error: {str(e)}")
+                continue
+            except Exception as e:
+                print(f"Unknown error: {str(e)}")
+                continue
 
-        # Check if compression was successful
-        if process.returncode != 0:
-            raise Exception("Compression failed")
-
-        # Verify output file
-        if not os.path.exists(output_file):
-            raise Exception("Compressed file not found")
+        # Wait for process to complete
+        return_code = await process.wait()
+        if return_code != 0:
+            raise Exception(f"FFmpeg process failed with return code {return_code}")
 
         # Get file sizes for comparison
         original_size = os.path.getsize(input_file)
