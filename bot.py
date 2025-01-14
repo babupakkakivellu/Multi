@@ -18,6 +18,10 @@ from pyrogram.errors import FloodWait, RPCError, BadRequest, Forbidden
 API_ID = "16501053" 
 API_HASH = "d8c9b01c863dabacc484c2c06cdd0f6e" 
 BOT_TOKEN = "8125717355:AAGEqXec28WfZ5V_wb4bkKoSyTt_slw6x2I"
+AUTHORIZED_USERS = {
+    OWNER_ID,  # Owner ID
+    987654321, # Other authorized user IDs
+}
 
 # Initialize and start the bot
 app = Client(
@@ -251,6 +255,7 @@ async def show_settings_summary(message, state, task_id):
 
 # Message Handlers
 @app.on_message(filters.command("start"))
+@authorized_users_only
 async def start_command(client, message):
     try:
         welcome_text = (
@@ -437,6 +442,19 @@ async def handle_callback(client: Client, callback: CallbackQuery):
         await callback.answer(error_text, show_alert=True)
         if user_id in compression_tasks.tasks and task_id in compression_tasks.tasks[user_id]:
             compression_tasks.remove_task(user_id, task_id)
+
+def authorized_users_only(func):
+    async def wrapper(client, message):
+        user_id = message.from_user.id
+        if user_id not in AUTHORIZED_USERS:
+            await message.reply_text(
+                "⚠️ **Unauthorized Access**\n\n"
+                "You are not authorized to use this bot."
+                "Contact :- @Blaster_ONFR For Access."
+            )
+            return
+        return await func(client, message)
+    return wrapper
 
 @app.on_message(filters.text & filters.private)
 async def handle_filename(client: Client, message: Message):
