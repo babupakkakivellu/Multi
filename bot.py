@@ -164,21 +164,33 @@ async def progress_callback(current, total, message, start_time, action):
         now = time.time()
         elapsed_time = now - start_time
         
-        # Only update every 3 seconds to avoid FloodWait
-        if hasattr(message, 'last_update') and (now - message.last_update) < 3:
+        # Only update every 5 seconds to avoid FloodWait and MESSAGE_NOT_MODIFIED errors
+        if hasattr(message, 'last_update') and (now - message.last_update) < 5:
             return
         message.last_update = now
 
         # Calculate progress percentage
         percentage = (current / total) * 100 if total else 0
         
+        # Round percentage to avoid minor changes triggering edits
+        percentage = round(percentage, 1)
+        
+        # Store last percentage to avoid duplicate updates
+        if hasattr(message, 'last_percentage') and message.last_percentage == percentage:
+            return
+        message.last_percentage = percentage
+        
         # Simple status text with just the percentage
-        status_text = f"⏳ **{action}:** {percentage:.1f}%"
+        status_text = f"⏳ **{action}:** {percentage}%"
 
         try:
             await message.edit_text(status_text)
-        except FloodWait as e:
-            await asyncio.sleep(e.value)
+        except (FloodWait, BadRequest) as e:
+            if isinstance(e, FloodWait):
+                await asyncio.sleep(e.value)
+            # Ignore MESSAGE_NOT_MODIFIED errors
+            if isinstance(e, BadRequest) and "MESSAGE_NOT_MODIFIED" not in str(e):
+                raise e
             
     except Exception as e:
         print(f"Progress callback error: {str(e)}")
