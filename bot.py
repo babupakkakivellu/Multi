@@ -276,18 +276,18 @@ async def handle_callback(client: Client, callback: CallbackQuery):
             await callback.answer("Task not found or expired", show_alert=True)
             return
         
-        if data == "cancel":
+        if action == "cancel":
+            compression_tasks.remove_task(user_id, task_id)
             await callback.message.edit_text("❌ Operation cancelled.")
-            del user_states[user_id]
             return
         
-        elif data.startswith("theme:"):
-            theme_id = data.split(":")[1]
+        elif action == "theme":
+            theme_id = params[0]
             if theme_id == "custom":
                 await callback.message.edit_text(
                     "⚙️ **Custom Compression Settings**\n\n"
                     "Select what you want to configure:",
-                    reply_markup=create_custom_menu()
+                    reply_markup=create_custom_menu(task_id)
                 )
             else:
                 theme = THEMES[theme_id]
@@ -297,14 +297,14 @@ async def handle_callback(client: Client, callback: CallbackQuery):
                 state.codec = theme["codec"]
                 state.pixel_format = theme["pixel_format"]
                 
-                await show_format_selection(callback.message, theme["name"])
+                await show_format_selection(callback.message, theme["name"], task_id)
         
-        elif data.startswith("custom:"):
-            action = data.split(":")[1]
-            if action == "resolution":
-                buttons = [[InlineKeyboardButton(name, callback_data=f"res:{value}")] 
+        elif action == "custom":
+            setting = params[0]
+            if setting == "resolution":
+                buttons = [[InlineKeyboardButton(name, callback_data=f"res:{task_id}:{value}")] 
                           for name, value in RESOLUTIONS.items()]
-                buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="custom:back")])
+                buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"custom:{task_id}:back")])
                 await callback.message.edit_text(
                     "📐 **Select Output Resolution:**\n\n"
                     "Lower resolution = Smaller file size\n"
@@ -312,10 +312,10 @@ async def handle_callback(client: Client, callback: CallbackQuery):
                     reply_markup=InlineKeyboardMarkup(buttons)
                 )
             
-            elif action == "preset":
-                buttons = [[InlineKeyboardButton(name, callback_data=f"preset:{value}")] 
+            elif setting == "preset":
+                buttons = [[InlineKeyboardButton(name, callback_data=f"preset:{task_id}:{value}")] 
                           for name, value in PRESETS.items()]
-                buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="custom:back")])
+                buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"custom:{task_id}:back")])
                 await callback.message.edit_text(
                     "⚡ **Select Encoding Preset:**\n\n"
                     "Faster = Larger file size\n"
@@ -323,10 +323,10 @@ async def handle_callback(client: Client, callback: CallbackQuery):
                     reply_markup=InlineKeyboardMarkup(buttons)
                 )
             
-            elif action == "crf":
-                buttons = [[InlineKeyboardButton(name, callback_data=f"crf:{value}")] 
+            elif setting == "crf":
+                buttons = [[InlineKeyboardButton(name, callback_data=f"crf:{task_id}:{value}")] 
                           for name, value in CRF_VALUES.items()]
-                buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="custom:back")])
+                buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"custom:{task_id}:back")])
                 await callback.message.edit_text(
                     "🎯 **Select Quality (CRF Value):**\n\n"
                     "Lower value = Better quality, larger size\n"
@@ -334,23 +334,23 @@ async def handle_callback(client: Client, callback: CallbackQuery):
                     reply_markup=InlineKeyboardMarkup(buttons)
                 )
             
-            elif action == "confirm":
-                await show_format_selection(callback.message, "Custom Settings")
+            elif setting == "confirm":
+                await show_format_selection(callback.message, "Custom Settings", task_id)
             
-            elif action == "back":
+            elif setting == "back":
                 await callback.message.edit_text(
                     "⚙️ **Custom Compression Settings**\n\n"
                     "Select what you want to configure:",
-                    reply_markup=create_custom_menu()
+                    reply_markup=create_custom_menu(task_id)
                 )
         
-        elif data.startswith(("res:", "preset:", "crf:")):
-            setting_type, value = data.split(":")
-            if setting_type == "res":
+        elif action in ["res", "preset", "crf"]:
+            value = params[0]
+            if action == "res":
                 state.resolution = value
-            elif setting_type == "preset":
+            elif action == "preset":
                 state.preset = value
-            elif setting_type == "crf":
+            elif action == "crf":
                 state.crf = value
             
             await callback.message.edit_text(
@@ -360,11 +360,11 @@ async def handle_callback(client: Client, callback: CallbackQuery):
                 f"• Preset: {state.preset}\n"
                 f"• CRF: {state.crf}\n\n"
                 "Select what you want to configure:",
-                reply_markup=create_custom_menu()
+                reply_markup=create_custom_menu(task_id)
             )
         
-        elif data.startswith("format:"):
-            state.output_format = data.split(":")[1]
+        elif action == "format":
+            state.output_format = params[0]
             await callback.message.edit_text(
                 "📝 **Enter Custom Filename**\n\n"
                 "• Send new filename\n"
@@ -374,13 +374,12 @@ async def handle_callback(client: Client, callback: CallbackQuery):
             state.waiting_for_filename = True
         
         await callback.answer()
-    
+        
     except Exception as e:
         error_text = f"❌ Callback error: {str(e)}"
         print(error_text)
         await callback.answer(error_text, show_alert=True)
-        if user_id in user_states:
-            del user_states[user_id]
+        compression_tasks.remove_task(user_id, task_id)
 
 @app.on_message(filters.text & filters.private)
 async def handle_filename(client: Client, message: Message):
