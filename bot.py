@@ -18,9 +18,10 @@ from pyrogram.errors import FloodWait, RPCError, BadRequest, Forbidden
 API_ID = "16501053" 
 API_HASH = "d8c9b01c863dabacc484c2c06cdd0f6e" 
 BOT_TOKEN = "8125717355:AAGEqXec28WfZ5V_wb4bkKoSyTt_slw6x2I"
+OWNER_ID = 5422016608
 AUTHORIZED_USERS = {
     OWNER_ID,  # Owner ID
-    987654321, # Other authorized user IDs
+    5422016608, # Other authorized user IDs
 }
 
 # Initialize and start the bot
