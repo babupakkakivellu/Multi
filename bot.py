@@ -32,8 +32,6 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
-# Global progress lock
-progress_lock = asyncio.Lock()
 # Compression Settings
 RESOLUTIONS = {
     "144p 📱": "256x144",
@@ -163,42 +161,39 @@ def format_size(size):
 
 async def progress_callback(current, total, message, start_time, action):
     try:
-        # Handle cases where total is 0 or None
-        if not total or total <= 0:
-            await message.edit_text("❌ Invalid file size. Progress cannot be calculated.")
-            return
-
         now = time.time()
         elapsed_time = now - start_time
+        
+        # Only update every 5 seconds to avoid FloodWait and MESSAGE_NOT_MODIFIED errors
+        if hasattr(message, 'last_update') and (now - message.last_update) < 5:
+            return
+        message.last_update = now
 
-        # Calculate percentage
-        percentage = (current / total) * 100
+        # Calculate progress percentage
+        percentage = (current / total) * 100 if total else 0
+        
+        # Round percentage to avoid minor changes triggering edits
         percentage = round(percentage, 1)
+        
+        # Store last percentage to avoid duplicate updates
+        if hasattr(message, 'last_percentage') and message.last_percentage == percentage:
+            return
+        message.last_percentage = percentage
+        
+        # Simple status text with just the percentage
+        status_text = f"⏳ **{action}:** {percentage}%"
 
-        # Calculate speed and ETA
-        speed = current / elapsed_time if elapsed_time > 0 else 0
-        eta = (total - current) / speed if speed > 0 else float('inf')
-
-        # Format progress bar
-        progress_bar = f"[{'█' * int(percentage // 5):<20}]"
-
-        # Create status text
-        status_text = (
-            f"⏳ **{action}**\n"
-            f"{progress_bar} {percentage:.1f}%\n"
-            f"🔄 **Speed:** {format_size(speed)}/s\n"
-            f"⏱️ **Elapsed:** {elapsed_time:.1f}s | **ETA:** {eta:.1f}s\n"
-            f"📊 **Total:** {format_size(total)} | **Done:** {format_size(current)}"
-        )
-
-        # Update message only if there’s a meaningful change
-        if not hasattr(message, 'last_percentage') or abs(message.last_percentage - percentage) >= 1:
-            message.last_percentage = percentage
+        try:
             await message.edit_text(status_text)
-
+        except (FloodWait, BadRequest) as e:
+            if isinstance(e, FloodWait):
+                await asyncio.sleep(e.value)
+            # Ignore MESSAGE_NOT_MODIFIED errors
+            if isinstance(e, BadRequest) and "MESSAGE_NOT_MODIFIED" not in str(e):
+                raise e
+            
     except Exception as e:
-        print(f"Error in progress_callback: {str(e)}")
-
+        print(f"Progress callback error: {str(e)}")
 
 # UI Components
 def create_theme_menu(task_id):
