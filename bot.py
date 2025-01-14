@@ -51,37 +51,39 @@ PRESETS = {
 CRF_VALUES = {
     "15 - Visually Lossless 🎯": "15",
     "18 - High Quality 🎥": "18",
-    "23 - Medium Quality 📺": "23",
-    "28 - Low Quality 📱": "28"
+    "23": "23",
+    "24": "24",
+    "25": "25"
+    "26": "26"
 }
 
 THEMES = {
-    "mobile": {
-        "name": "📱 Mobile Data Saver",
+    "480p 10bit": {
+        "name": "Low Quality",
         "resolution": "480x360",
-        "preset": "veryfast",
-        "crf": "28",
-        "codec": "libx264",
-        "pixel_format": "yuv420p",
-        "description": "Smallest size, good for mobile data"
+        "preset": "fast",
+        "crf": "24",
+        "codec": "libx265",
+        "pixel_format": "yuv420p10le",
+        "description": "Good But 480p"
     },
-    "telegram": {
-        "name": "📬 Telegram Optimized",
+    "720p 10bit": {
+        "name": "Medium Quality",
         "resolution": "720x480",
-        "preset": "medium",
-        "crf": "23",
-        "codec": "libx264",
-        "pixel_format": "yuv420p",
-        "description": "Balanced for Telegram sharing"
+        "preset": "fast",
+        "crf": "24",
+        "codec": "libx265",
+        "pixel_format": "yuv420p10le",
+        "description": "Better"
     },
-    "high": {
-        "name": "🎯 High Quality",
-        "resolution": "1280x720",
-        "preset": "slow",
-        "crf": "18",
-        "codec": "libx264",
-        "pixel_format": "yuv420p",
-        "description": "Best quality, larger size"
+    "1080p 10bit": {
+        "name": "High Quality",
+        "resolution": "1920x1080",
+        "preset": "fast",
+        "crf": "14",
+        "codec": "libx265",
+        "pixel_format": "yuv420p10le",
+        "description": "High Quality"
     }
 }
 
@@ -187,11 +189,11 @@ async def progress_callback(current, total, message, start_time, action):
 def create_theme_menu(task_id):
     buttons = [
         [
-            InlineKeyboardButton("📱 Mobile Saver", callback_data=f"theme:{task_id}:mobile"),
-            InlineKeyboardButton("📬 Telegram", callback_data=f"theme:{task_id}:telegram")
+            InlineKeyboardButton("480p 10bit", callback_data=f"theme:{task_id}:mobile"),
+            InlineKeyboardButton("720p 10bit", callback_data=f"theme:{task_id}:telegram")
         ],
         [
-            InlineKeyboardButton("🎯 High Quality", callback_data=f"theme:{task_id}:high"),
+            InlineKeyboardButton("1080p 10bit", callback_data=f"theme:{task_id}:high"),
             InlineKeyboardButton("⚙️ Custom", callback_data=f"theme:{task_id}:custom")
         ],
         [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{task_id}")]
@@ -261,13 +263,13 @@ async def start_command(client, message):
         welcome_text = (
             "🎥 **Welcome to Video Compression Bot!**\n\n"
             "I can help you compress videos with various settings:\n\n"
-            "📱 **Mobile Data Saver**\n"
+            "📱 **480p 10bit**\n"
             "• Smallest file size\n"
             "• Good for mobile data\n\n"
-            "📬 **Telegram Optimized**\n"
+            "📬 **720p 10bit**\n"
             "• Balanced quality\n"
             "• Perfect for sharing\n\n"
-            "🎯 **High Quality**\n"
+            "🎯 **1080p 10bit**\n"
             "• Best quality\n"
             "• Larger file size\n\n"
             "⚙️ **Custom Settings**\n"
