@@ -123,6 +123,7 @@ compression_tasks = CompressionTasks()
 app = Client("video_compress_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 def format_size(size):
+    """Format size in bytes to human readable format"""
     try:
         size = float(abs(size))
         if size == 0:
@@ -132,22 +133,28 @@ def format_size(size):
         while size >= 1024.0 and i < len(units)-1:
             size /= 1024.0
             i += 1
-        return f"{size:.2f} {units[i]}"
+        # Use 2 decimal places for MB and above, 0 for B and KB
+        if i >= 2:
+            return f"{size:.2f} {units[i]}"
+        else:
+            return f"{int(size)} {units[i]}"
     except Exception as e:
         print(f"Size format error: {str(e)}")
         return "0B"
 
 def create_progress_bar(current, total, length=20):
+    """Create a progress bar with filled and empty portions"""
     try:
         current = float(current)
         total = float(total)
         percentage = min(1, current / total) if total > 0 else 0
         filled_length = int(length * percentage)
-        return "█" * filled_length + "░" * (length - filled_length)
+        bar = '█' * filled_length + '░' * (length - filled_length)
+        return bar
     except Exception as e:
         print(f"Progress bar error: {str(e)}")
         return "░" * length
-
+        
 def create_theme_menu(task_id):
     buttons = [
         [
@@ -458,40 +465,42 @@ async def handle_filename(client: Client, message: Message):
 async def progress_callback(current, total, message, start_time, action):
     try:
         now = time.time()
-        elapsed_time = max(0.1, now - start_time)
+        elapsed_time = max(1, now - start_time)  # Prevent division by zero
         
         # Only update every 2 seconds to avoid FloodWait
         if hasattr(message, 'last_update') and (now - message.last_update) < 2:
             return
         message.last_update = now
 
-        # Store the actual total size when first received
-        if not hasattr(message, 'actual_total'):
-            message.actual_total = total
-
-        # Use stored actual total size
-        total = message.actual_total or current
-
         # Calculate progress metrics
-        progress = min(100, (current * 100) / total) if total else 0
-        speed = current / elapsed_time
-        eta = (total - current) / speed if speed > 0 else 0
+        percentage = min(100, (current * 100) / total) if total else 0
+        speed = current / elapsed_time  # bytes per second
+        
+        # Calculate ETA
+        if speed > 0:
+            eta = (total - current) / speed
+        else:
+            eta = 0
 
         # Create progress bar
         progress_bar = create_progress_bar(current, total)
         
-        # Format sizes with actual values
+        # Format sizes
         current_size = format_size(current)
         total_size = format_size(total)
         speed_text = format_size(speed)
 
+        # Format time strings
+        elapsed = time.strftime('%H:%M:%S', time.gmtime(elapsed_time))
+        eta_time = time.strftime('%H:%M:%S', time.gmtime(eta))
+
         text = (
             f"**{action}**\n\n"
-            f"💫 **Progress:** {progress:.1f}%\n"
+            f"💫 **Progress:** {percentage:.1f}%\n"
             f"{progress_bar}\n"
             f"⚡ **Speed:** {speed_text}/s\n"
-            f"⏱️ **Elapsed:** {time.strftime('%H:%M:%S', time.gmtime(elapsed_time))}\n"
-            f"⏳ **ETA:** {time.strftime('%H:%M:%S', time.gmtime(eta))}\n"
+            f"⏱️ **Elapsed:** {elapsed}\n"
+            f"⏳ **ETA:** {eta_time}\n"
             f"📊 **Size:** {current_size} / {total_size}"
         )
         
