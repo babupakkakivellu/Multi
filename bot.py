@@ -387,11 +387,23 @@ async def handle_filename(client: Client, message: Message):
 async def progress_callback(current, total, message, start_time, action):
     try:
         now = time.time()
-        elapsed_time = now - start_time
-        speed = current / elapsed_time if elapsed_time > 0 else 0
-        progress = (current / total) * 100
-        eta = (total - current) / speed if speed > 0 else 0
+        elapsed_time = max(0.1, now - start_time)  # Prevent division by zero
         
+        # Only update every 2 seconds to avoid FloodWait
+        if hasattr(message, 'last_update') and (now - message.last_update) < 2:
+            return
+        message.last_update = now
+
+        # Calculate progress metrics with safety checks
+        if total == 0:
+            progress = 0
+            speed = 0
+            eta = 0
+        else:
+            progress = min(100, (current * 100) / total)
+            speed = current / elapsed_time
+            eta = (total - current) / speed if speed > 0 else 0
+
         progress_bar = create_progress_bar(current, total)
         
         text = (
@@ -405,10 +417,28 @@ async def progress_callback(current, total, message, start_time, action):
         )
         
         await message.edit_text(text)
+        
     except FloodWait as e:
+        print(f"FloodWait: waiting for {e.value} seconds")
         await asyncio.sleep(e.value)
     except Exception as e:
         print(f"Progress callback error: {str(e)}")
+
+def create_progress_bar(current, total, length=20):
+    if total == 0:
+        return "░" * length
+    filled_length = int(length * current // max(1, total))
+    return "█" * filled_length + "░" * (length - filled_length)
+
+def format_size(size):
+    if size == 0:
+        return "0B"
+    units = ['B', 'KB', 'MB', 'GB', 'TB']
+    index = 0
+    while size >= 1024 and index < len(units) - 1:
+        size /= 1024
+        index += 1
+    return f"{size:.2f} {units[index]}"
 
 async def start_compression(client: Client, state: CompressionState):
     progress_msg = await state.message.reply_text(
