@@ -394,21 +394,24 @@ async def progress_callback(current, total, message, start_time, action):
             return
         message.last_update = now
 
-        # Fix for total being None or 0
-        if not total or total == 0:
-            total = current if current > 0 else 1
+        # Store the actual total size when first received
+        if not hasattr(message, 'actual_total'):
+            message.actual_total = total
+
+        # Use stored actual total size
+        total = message.actual_total
 
         # Calculate progress metrics
-        progress = min(100, (current * 100) / total)
+        progress = min(100, (current * 100) / total) if total else 0
         speed = current / elapsed_time
         eta = (total - current) / speed if speed > 0 else 0
 
         # Create progress bar
         progress_bar = create_progress_bar(current, total)
         
-        # Format sizes properly
+        # Format sizes with actual values
         current_size = format_size(current)
-        total_size = format_size(total)
+        total_size = format_size(total)  # Using actual total size
         speed_text = format_size(speed)
 
         text = (
@@ -425,7 +428,7 @@ async def progress_callback(current, total, message, start_time, action):
             await message.edit_text(text)
         except FloodWait as e:
             await asyncio.sleep(e.value)
-        
+            
     except Exception as e:
         print(f"Progress callback error: {str(e)}")
 
