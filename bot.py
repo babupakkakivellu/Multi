@@ -58,7 +58,7 @@ CRF_VALUES = {
 }
 
 THEMES = {
-    "480p 10bit": {
+    "480p": {
         "name": "Low Quality",
         "resolution": "480x360",
         "preset": "fast",
@@ -67,7 +67,7 @@ THEMES = {
         "pixel_format": "yuv420p10le",
         "description": "Good But 480p"
     },
-    "720p 10bit": {
+    "720p": {
         "name": "Medium Quality",
         "resolution": "720x480",
         "preset": "fast",
@@ -76,7 +76,7 @@ THEMES = {
         "pixel_format": "yuv420p10le",
         "description": "Better"
     },
-    "1080p 10bit": {
+    "1080p": {
         "name": "High Quality",
         "resolution": "1920x1080",
         "preset": "fast",
@@ -189,11 +189,11 @@ async def progress_callback(current, total, message, start_time, action):
 def create_theme_menu(task_id):
     buttons = [
         [
-            InlineKeyboardButton("480p 10bit", callback_data=f"theme:{task_id}:mobile"),
-            InlineKeyboardButton("720p 10bit", callback_data=f"theme:{task_id}:telegram")
+            InlineKeyboardButton("480p 10bit", callback_data=f"theme:{task_id}:480p"),
+            InlineKeyboardButton("720p 10bit", callback_data=f"theme:{task_id}:720p")
         ],
         [
-            InlineKeyboardButton("1080p 10bit", callback_data=f"theme:{task_id}:high"),
+            InlineKeyboardButton("1080p 10bit", callback_data=f"theme:{task_id}:1080p"),
             InlineKeyboardButton("⚙️ Custom", callback_data=f"theme:{task_id}:custom")
         ],
         [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{task_id}")]
