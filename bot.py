@@ -77,6 +77,7 @@ THEMES = {
     }
 }
 
+# Helper Classes
 class CompressionState:
     def __init__(self):
         self.file_id = None
@@ -120,8 +121,7 @@ class CompressionTasks:
 
 compression_tasks = CompressionTasks()
 
-app = Client("video_compress_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
+# Helper Functions
 def format_size(size):
     try:
         size = float(abs(size))
@@ -140,22 +140,42 @@ def format_size(size):
 async def progress_callback(current, total, message, start_time, action):
     try:
         now = time.time()
+        elapsed_time = now - start_time
         
         # Only update every 3 seconds to avoid FloodWait
         if hasattr(message, 'last_update') and (now - message.last_update) < 3:
             return
         message.last_update = now
 
-        text = f"⏳ **{action}...**"
+        # Calculate progress metrics
+        percentage = (current / total) * 100 if total else 0
+        speed = current / elapsed_time if elapsed_time else 0
+        eta = (total - current) / speed if speed > 0 else 0
         
+        # Create progress bar
+        bar_length = 20
+        filled_length = int(percentage / 100 * bar_length)
+        bar = '█' * filled_length + '░' * (bar_length - filled_length)
+        
+        # Format status text with emojis and progress information
+        status_text = (
+            f"⏳ **{action}**\n\n"
+            f"[{bar}] {percentage:.1f}%\n\n"
+            f"💾 **Size:** {format_size(current)} / {format_size(total)}\n"
+            f"⚡ **Speed:** {format_size(speed)}/s\n"
+            f"⏱️ **Elapsed:** {time.strftime('%H:%M:%S', time.gmtime(elapsed_time))}\n"
+            f"⌛ **ETA:** {time.strftime('%H:%M:%S', time.gmtime(eta))}"
+        )
+
         try:
-            await message.edit_text(text)
+            await message.edit_text(status_text)
         except FloodWait as e:
             await asyncio.sleep(e.value)
             
     except Exception as e:
         print(f"Progress callback error: {str(e)}")
 
+# UI Components
 def create_theme_menu(task_id):
     buttons = [
         [
@@ -196,6 +216,37 @@ async def show_format_selection(message, theme_name, task_id):
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
+def create_resolution_menu(task_id):
+    buttons = [[InlineKeyboardButton(name, callback_data=f"res:{task_id}:{value}")] 
+              for name, value in RESOLUTIONS.items()]
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"custom:{task_id}:back")])
+    return InlineKeyboardMarkup(buttons)
+
+def create_preset_menu(task_id):
+    buttons = [[InlineKeyboardButton(name, callback_data=f"preset:{task_id}:{value}")] 
+              for name, value in PRESETS.items()]
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"custom:{task_id}:back")])
+    return InlineKeyboardMarkup(buttons)
+
+def create_crf_menu(task_id):
+    buttons = [[InlineKeyboardButton(name, callback_data=f"crf:{task_id}:{value}")] 
+              for name, value in CRF_VALUES.items()]
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"custom:{task_id}:back")])
+    return InlineKeyboardMarkup(buttons)
+
+async def show_settings_summary(message, state, task_id):
+    text = (
+        "⚙️ **Current Settings**\n\n"
+        f"📐 Resolution: `{state.resolution}`\n"
+        f"⚡ Preset: `{state.preset}`\n"
+        f"🎯 CRF Value: `{state.crf}`\n"
+        f"🎬 Codec: `{state.codec}`\n"
+        f"🎨 Pixel Format: `{state.pixel_format}`\n\n"
+        "Select an option to modify:"
+    )
+    await message.edit_text(text, reply_markup=create_custom_menu(task_id))
+
+# Message Handlers
 @app.on_message(filters.command("start"))
 async def start_command(client, message):
     try:
@@ -298,6 +349,108 @@ async def cancel_command(client, message):
             "Send a video to start compression!"
         )
 
+@app.on_callback_query()
+async def handle_callback(client: Client, callback: CallbackQuery):
+    try:
+        user_id = callback.from_user.id
+        data = callback.data
+        
+        if ":" not in data:
+            await callback.answer("Invalid callback data", show_alert=True)
+            return
+            
+        action, task_id, *params = data.split(":")
+        state = compression_tasks.get_task(user_id, task_id)
+        
+        if not state:
+            await callback.answer("Task not found or expired", show_alert=True)
+            return
+        
+        if action == "cancel":
+            compression_tasks.remove_task(user_id, task_id)
+            await callback.message.edit_text("❌ Operation cancelled.")
+            return
+        
+        elif action == "theme":
+            theme_id = params[0]
+            if theme_id == "custom":
+                await callback.message.edit_text(
+                    "⚙️ **Custom Compression Settings**\n\n"
+                    "Select what you want to configure:",
+                    reply_markup=create_custom_menu(task_id)
+                )
+            else:
+                theme = THEMES[theme_id]
+                state.resolution = theme["resolution"]
+                state.preset = theme["preset"]
+                state.crf = theme["crf"]
+                state.codec = theme["codec"]
+                state.pixel_format = theme["pixel_format"]
+                
+                await show_format_selection(callback.message, theme["name"], task_id)
+        
+        elif action == "custom":
+            setting = params[0]
+            if setting == "resolution":
+                await callback.message.edit_text(
+                    "📐 **Select Output Resolution:**\n\n"
+                    "Lower resolution = Smaller file size\n"
+                    "Higher resolution = Better quality",
+                    reply_markup=create_resolution_menu(task_id)
+                )
+            
+            elif setting == "preset":
+                await callback.message.edit_text(
+                    "⚡ **Select Encoding Preset:**\n\n"
+                    "Faster = Larger file size\n"
+                    "Slower = Better compression",
+                    reply_markup=create_preset_menu(task_id)
+                )
+            
+            elif setting == "crf":
+                await callback.message.edit_text(
+                    "🎯 **Select Quality (CRF Value):**\n\n"
+                    "Lower value = Better quality, larger size\n"
+                    "Higher value = Lower quality, smaller size",
+                    reply_markup=create_crf_menu(task_id)
+                )
+            
+            elif setting == "confirm":
+                await show_format_selection(callback.message, "Custom Settings", task_id)
+            
+            elif setting == "back":
+                await show_settings_summary(callback.message, state, task_id)
+        
+        elif action in ["res", "preset", "crf"]:
+            value = params[0]
+            if action == "res":
+                state.resolution = value
+            elif action == "preset":
+                state.preset = value
+            elif action == "crf":
+                state.crf = value
+            
+            await show_settings_summary(callback.message, state, task_id)
+        
+        elif action == "format":
+            state.output_format = params[0]
+            await callback.message.edit_text(
+                "📝 **Enter Custom Filename**\n\n"
+                "• Send new filename\n"
+                "• Or send /skip to keep original name\n\n"
+                "Note: Include file extension (.mp4, .mkv, etc.)"
+            )
+            state.waiting_for_filename = True
+        
+        await callback.answer()
+        
+    except Exception as e:
+        error_text = f"❌ Callback error: {str(e)}"
+        print(error_text)
+        await callback.answer(error_text, show_alert=True)
+        if user_id in compression_tasks.tasks and task_id in compression_tasks.tasks[user_id]:
+            compression_tasks.remove_task(user_id, task_id)
+
 @app.on_message(filters.text & filters.private)
 async def handle_filename(client: Client, message: Message):
     try:
@@ -336,130 +489,6 @@ async def handle_filename(client: Client, message: Message):
         print(error_text)
         await message.reply_text(error_text)
         if task_id:
-            compression_tasks.remove_task(user_id, task_id)
-
-@app.on_callback_query()
-async def handle_callback(client: Client, callback: CallbackQuery):
-    try:
-        user_id = callback.from_user.id
-        data = callback.data
-        
-        # Extract task_id from callback data
-        if ":" not in data:
-            await callback.answer("Invalid callback data", show_alert=True)
-            return
-            
-        action, task_id, *params = data.split(":")
-        state = compression_tasks.get_task(user_id, task_id)
-        
-        if not state:
-            await callback.answer("Task not found or expired", show_alert=True)
-            return
-        
-        if action == "cancel":
-            compression_tasks.remove_task(user_id, task_id)
-            await callback.message.edit_text("❌ Operation cancelled.")
-            return
-        
-        elif action == "theme":
-            theme_id = params[0]
-            if theme_id == "custom":
-                await callback.message.edit_text(
-                    "⚙️ **Custom Compression Settings**\n\n"
-                    "Select what you want to configure:",
-                    reply_markup=create_custom_menu(task_id)
-                )
-            else:
-                theme = THEMES[theme_id]
-                state.resolution = theme["resolution"]
-                state.preset = theme["preset"]
-                state.crf = theme["crf"]
-                state.codec = theme["codec"]
-                state.pixel_format = theme["pixel_format"]
-                
-                await show_format_selection(callback.message, theme["name"], task_id)
-        
-        elif action == "custom":
-            setting = params[0]
-            if setting == "resolution":
-                buttons = [[InlineKeyboardButton(name, callback_data=f"res:{task_id}:{value}")] 
-                          for name, value in RESOLUTIONS.items()]
-                buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"custom:{task_id}:back")])
-                await callback.message.edit_text(
-                    "📐 **Select Output Resolution:**\n\n"
-                    "Lower resolution = Smaller file size\n"
-                    "Higher resolution = Better quality",
-                    reply_markup=InlineKeyboardMarkup(buttons)
-                )
-            
-            elif setting == "preset":
-                buttons = [[InlineKeyboardButton(name, callback_data=f"preset:{task_id}:{value}")] 
-                          for name, value in PRESETS.items()]
-                buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"custom:{task_id}:back")])
-                await callback.message.edit_text(
-                    "⚡ **Select Encoding Preset:**\n\n"
-                    "Faster = Larger file size\n"
-                    "Slower = Better compression",
-                    reply_markup=InlineKeyboardMarkup(buttons)
-                )
-            
-            elif setting == "crf":
-                buttons = [[InlineKeyboardButton(name, callback_data=f"crf:{task_id}:{value}")] 
-                          for name, value in CRF_VALUES.items()]
-                buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"custom:{task_id}:back")])
-                await callback.message.edit_text(
-                    "🎯 **Select Quality (CRF Value):**\n\n"
-                    "Lower value = Better quality, larger size\n"
-                    "Higher value = Lower quality, smaller size",
-                    reply_markup=InlineKeyboardMarkup(buttons)
-                )
-            
-            elif setting == "confirm":
-                await show_format_selection(callback.message, "Custom Settings", task_id)
-            
-            elif setting == "back":
-                await callback.message.edit_text(
-                    "⚙️ **Custom Compression Settings**\n\n"
-                    "Select what you want to configure:",
-                    reply_markup=create_custom_menu(task_id)
-                )
-        
-        elif action in ["res", "preset", "crf"]:
-            value = params[0]
-            if action == "res":
-                state.resolution = value
-            elif action == "preset":
-                state.preset = value
-            elif action == "crf":
-                state.crf = value
-            
-            await callback.message.edit_text(
-                "⚙️ **Custom Compression Settings**\n\n"
-                f"Current Settings:\n"
-                f"• Resolution: {state.resolution}\n"
-                f"• Preset: {state.preset}\n"
-                f"• CRF: {state.crf}\n\n"
-                "Select what you want to configure:",
-                reply_markup=create_custom_menu(task_id)
-            )
-        
-        elif action == "format":
-            state.output_format = params[0]
-            await callback.message.edit_text(
-                "📝 **Enter Custom Filename**\n\n"
-                "• Send new filename\n"
-                "• Or send /skip to keep original name\n\n"
-                "Note: Include file extension (.mp4, .mkv, etc.)"
-            )
-            state.waiting_for_filename = True
-        
-        await callback.answer()
-        
-    except Exception as e:
-        error_text = f"❌ Callback error: {str(e)}"
-        print(error_text)
-        await callback.answer(error_text, show_alert=True)
-        if user_id in compression_tasks.tasks and task_id in compression_tasks.tasks[user_id]:
             compression_tasks.remove_task(user_id, task_id)
 
 async def start_compression(client: Client, state: CompressionState):
@@ -589,7 +618,7 @@ async def start_compression(client: Client, state: CompressionState):
                     duration=int(duration),
                     caption=caption,
                     progress=progress_callback,
-                    progress_args=(progress_msg, start_time, "Uploading")
+                    progress_args=(progress_msg, time.time(), "Uploading")
                 )
             else:
                 await client.send_document(
@@ -598,7 +627,7 @@ async def start_compression(client: Client, state: CompressionState):
                     thumb=thumbnail,
                     caption=caption,
                     progress=progress_callback,
-                    progress_args=(progress_msg, start_time, "Uploading")
+                    progress_args=(progress_msg, time.time(), "Uploading")
                 )
 
             await progress_msg.edit_text(
@@ -638,6 +667,13 @@ async def start_compression(client: Client, state: CompressionState):
         if state.message.from_user.id in compression_tasks.tasks:
             compression_tasks.remove_task(state.message.from_user.id, state.task_id)
 
-# Start the bot
+# Initialize and start the bot
+app = Client(
+    "video_compress_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
+
 print("🤖 Bot is running...")
-app.run() 
+app.run()
