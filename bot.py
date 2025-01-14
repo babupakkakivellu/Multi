@@ -580,14 +580,17 @@ async def start_compression(client: Client, state: CompressionState):
         # FFmpeg compression command
         ffmpeg_cmd = [
             "ffmpeg", "-i", input_file,
+            "-hide_banner", "-ignore_unknown",
             "-c:v", state.codec,
             "-preset", state.preset,
             "-crf", str(state.crf),
             "-vf", f"scale={state.resolution}",
             "-pix_fmt", state.pixel_format,
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-movflags", "+faststart",
+            "-c:a", "copy",
+            "-c:s", "copy",
+            "-map", "0:v",
+            "-map", "0:a",
+            "-map", "0:s?",
             "-y",
             output_file
         ]
