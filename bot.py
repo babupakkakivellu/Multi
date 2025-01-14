@@ -108,20 +108,6 @@ def create_progress_bar(current, total, length=20):
     bar = '█' * filled_length + '░' * (length - filled_length)
     return bar
 
-def create_theme_menu():
-    buttons = [
-        [
-            InlineKeyboardButton("📱 Mobile Saver", callback_data="theme:mobile"),
-            InlineKeyboardButton("📬 Telegram", callback_data="theme:telegram")
-        ],
-        [
-            InlineKeyboardButton("🎯 High Quality", callback_data="theme:high"),
-            InlineKeyboardButton("⚙️ Custom", callback_data="theme:custom")
-        ],
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
-    ]
-    return InlineKeyboardMarkup(buttons)
-
 def create_theme_menu(task_id):
     buttons = [
         [
@@ -136,25 +122,6 @@ def create_theme_menu(task_id):
     ]
     return InlineKeyboardMarkup(buttons)
 
-@app.on_callback_query()
-async def handle_callback(client: Client, callback: CallbackQuery):
-    try:
-        user_id = callback.from_user.id
-        data = callback.data
-        
-        # Extract task_id from callback data
-        if ":" not in data:
-            await callback.answer("Invalid callback data", show_alert=True)
-            return
-            
-        action, task_id, *params = data.split(":")
-        state = compression_tasks.get_task(user_id, task_id)
-        
-        if not state:
-            await callback.answer("Task not found or expired", show_alert=True)
-            return
-            
-        # Rest of your callback handling code...
 
 async def show_format_selection(message, theme_name):
     buttons = [
@@ -297,11 +264,17 @@ async def handle_callback(client: Client, callback: CallbackQuery):
         user_id = callback.from_user.id
         data = callback.data
         
-        if user_id not in user_states:
-            await callback.answer("⚠️ Session expired. Please send the video again.", show_alert=True)
+        # Extract task_id from callback data
+        if ":" not in data:
+            await callback.answer("Invalid callback data", show_alert=True)
             return
+            
+        action, task_id, *params = data.split(":")
+        state = compression_tasks.get_task(user_id, task_id)
         
-        state = user_states[user_id]
+        if not state:
+            await callback.answer("Task not found or expired", show_alert=True)
+            return
         
         if data == "cancel":
             await callback.message.edit_text("❌ Operation cancelled.")
