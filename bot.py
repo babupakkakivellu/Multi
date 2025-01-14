@@ -122,15 +122,39 @@ def create_theme_menu():
     ]
     return InlineKeyboardMarkup(buttons)
 
-def create_custom_menu():
+def create_theme_menu(task_id):
     buttons = [
-        [InlineKeyboardButton("📐 Resolution", callback_data="custom:resolution")],
-        [InlineKeyboardButton("⚡ Preset", callback_data="custom:preset")],
-        [InlineKeyboardButton("🎯 Quality (CRF)", callback_data="custom:crf")],
-        [InlineKeyboardButton("✅ Confirm Settings", callback_data="custom:confirm")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+        [
+            InlineKeyboardButton("📱 Mobile Saver", callback_data=f"theme:{task_id}:mobile"),
+            InlineKeyboardButton("📬 Telegram", callback_data=f"theme:{task_id}:telegram")
+        ],
+        [
+            InlineKeyboardButton("🎯 High Quality", callback_data=f"theme:{task_id}:high"),
+            InlineKeyboardButton("⚙️ Custom", callback_data=f"theme:{task_id}:custom")
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{task_id}")]
     ]
     return InlineKeyboardMarkup(buttons)
+
+@app.on_callback_query()
+async def handle_callback(client: Client, callback: CallbackQuery):
+    try:
+        user_id = callback.from_user.id
+        data = callback.data
+        
+        # Extract task_id from callback data
+        if ":" not in data:
+            await callback.answer("Invalid callback data", show_alert=True)
+            return
+            
+        action, task_id, *params = data.split(":")
+        state = compression_tasks.get_task(user_id, task_id)
+        
+        if not state:
+            await callback.answer("Task not found or expired", show_alert=True)
+            return
+            
+        # Rest of your callback handling code...
 
 async def show_format_selection(message, theme_name):
     buttons = [
@@ -172,20 +196,51 @@ async def start_command(client, message):
         print(f"Start command error: {str(e)}")
         await message.reply_text("❌ An error occurred. Please try again.")
 
+class CompressionTasks:
+    def __init__(self):
+        self.tasks = {}  # Dictionary to store multiple tasks per user
+        self.max_tasks = 3  # Maximum concurrent tasks per user
+
+    def add_task(self, user_id, task_id, state):
+        if user_id not in self.tasks:
+            self.tasks[user_id] = {}
+        
+        if len(self.tasks[user_id]) >= self.max_tasks:
+            return False
+            
+        self.tasks[user_id][task_id] = state
+        return True
+
+    def remove_task(self, user_id, task_id):
+        if user_id in self.tasks and task_id in self.tasks[user_id]:
+            del self.tasks[user_id][task_id]
+            if not self.tasks[user_id]:
+                del self.tasks[user_id]
+
+    def get_task(self, user_id, task_id):
+        return self.tasks.get(user_id, {}).get(task_id)
+
+    def get_user_tasks_count(self, user_id):
+        return len(self.tasks.get(user_id, {}))
+
+# Replace user_states with compression_tasks
+compression_tasks = CompressionTasks()
+
 @app.on_message(filters.video | filters.document)
 async def handle_video(client: Client, message: Message):
     try:
         user_id = message.from_user.id
+        task_id = str(int(time.time()))  # Unique task ID based on timestamp
         
-        if user_id in user_states:
+        # Check if user has reached maximum tasks
+        if compression_tasks.get_user_tasks_count(user_id) >= compression_tasks.max_tasks:
             await message.reply_text(
-                "⚠️ You have an ongoing compression task.\n"
-                "Please wait for it to complete or send /cancel."
+                f"⚠️ Maximum concurrent tasks ({compression_tasks.max_tasks}) reached.\n"
+                "Please wait for some tasks to complete first."
             )
             return
         
-        user_states[user_id] = CompressionState()
-        state = user_states[user_id]
+        state = CompressionState()
         
         if message.video:
             state.file_id = message.video.file_id
@@ -197,7 +252,6 @@ async def handle_video(client: Client, message: Message):
         else:
             if not message.document.mime_type or not message.document.mime_type.startswith("video/"):
                 await message.reply_text("❌ Please send a valid video file.")
-                del user_states[user_id]
                 return
                 
             state.file_id = message.document.file_id
@@ -208,31 +262,34 @@ async def handle_video(client: Client, message: Message):
         
         if file_size > 2_000_000_000:  # 2GB limit
             await message.reply_text("❌ File too large. Maximum size: 2GB")
-            del user_states[user_id]
             return
         
         state.message = message
+        state.task_id = task_id
         
-        info_text = (
-            "📽️ **Video Information**\n\n"
-            f"📁 **Filename:** `{state.file_name}`\n"
-            f"💾 **Size:** {format_size(file_size)}\n"
-            f"⏱️ **Duration:** {duration} seconds\n"
-            f"📐 **Resolution:** {width}x{height}\n\n"
-            "**Choose a Compression Theme:**"
-        )
-        
-        await message.reply_text(
-            info_text,
-            reply_markup=create_theme_menu()
-        )
+        # Add task to compression tasks
+        if compression_tasks.add_task(user_id, task_id, state):
+            info_text = (
+                f"🎥 **Task ID:** `{task_id}`\n\n"
+                "📽️ **Video Information**\n\n"
+                f"📁 **Filename:** `{state.file_name}`\n"
+                f"💾 **Size:** {format_size(file_size)}\n"
+                f"⏱️ **Duration:** {duration} seconds\n"
+                f"📐 **Resolution:** {width}x{height}\n\n"
+                "**Choose a Compression Theme:**"
+            )
+            
+            await message.reply_text(
+                info_text,
+                reply_markup=create_theme_menu(task_id)
+            )
+        else:
+            await message.reply_text("❌ Failed to start compression task. Please try again.")
     
     except Exception as e:
         error_text = f"❌ Error processing video: {str(e)}"
         print(error_text)
         await message.reply_text(error_text)
-        if user_id in user_states:
-            del user_states[user_id]
 
 @app.on_callback_query()
 async def handle_callback(client: Client, callback: CallbackQuery):
