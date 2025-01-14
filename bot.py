@@ -3,17 +3,23 @@ import time
 import json
 import asyncio
 import subprocess
+import re
 from datetime import datetime
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.types import (
+    Message, 
+    InlineKeyboardMarkup, 
+    InlineKeyboardButton, 
+    CallbackQuery
+)
 from pyrogram.errors import FloodWait, RPCError, BadRequest, Forbidden
 
-# Bot configuration from environment variables
-API_ID = os.getenv("API_ID", "16501053")
-API_HASH = os.getenv("API_HASH", "d8c9b01c863dabacc484c2c06cdd0f6e")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8125717355:AAGEqXec28WfZ5V_wb4bkKoSyTt_slw6x2I")
+# Bot configuration
+API_ID = "16501053" 
+API_HASH = "d8c9b01c863dabacc484c2c06cdd0f6e" 
+BOT_TOKEN = "8125717355:AAGEqXec28WfZ5V_wb4bkKoSyTt_slw6x2I"
 
-# Compression settings
+# Compression Settings
 RESOLUTIONS = {
     "144p 📱": "256x144",
     "240p 📱": "426x240",
@@ -41,57 +47,42 @@ CRF_VALUES = {
     "28 - Low Quality 📱": "28"
 }
 
-class ProgressTracker:
-    def __init__(self):
-        self.start_time = time.time()
-        self.last_update_time = 0
-        self.last_current = 0
-        self.total = 0
-        self.speed_history = []
-        self.update_interval = 2
-
-    def calculate_speed(self, current):
-        now = time.time()
-        elapsed = now - self.last_update_time
-        if elapsed > 0:
-            speed = (current - self.last_current) / elapsed
-            self.speed_history.append(speed)
-            if len(self.speed_history) > 5:
-                self.speed_history.pop(0)
-        return sum(self.speed_history) / len(self.speed_history) if self.speed_history else 0
-
-    def should_update(self):
-        return (time.time() - self.last_update_time) >= self.update_interval
-
-    def update(self, current, total):
-        self.total = total
-        now = time.time()
-        
-        if self.should_update():
-            speed = self.calculate_speed(current)
-            self.last_current = current
-            self.last_update_time = now
-            
-            elapsed_time = now - self.start_time
-            eta = (total - current) / speed if speed > 0 else 0
-            progress = (current / total * 100) if total > 0 else 0
-            
-            return {
-                'progress': min(100, progress),
-                'speed': speed,
-                'elapsed': elapsed_time,
-                'eta': eta,
-                'current_size': format_size(current),
-                'total_size': format_size(total),
-                'should_update': True
-            }
-        return {'should_update': False}
+THEMES = {
+    "mobile": {
+        "name": "📱 Mobile Data Saver",
+        "resolution": "480x360",
+        "preset": "veryfast",
+        "crf": "28",
+        "codec": "libx264",
+        "pixel_format": "yuv420p",
+        "description": "Smallest size, good for mobile data"
+    },
+    "telegram": {
+        "name": "📬 Telegram Optimized",
+        "resolution": "720x480",
+        "preset": "medium",
+        "crf": "23",
+        "codec": "libx264",
+        "pixel_format": "yuv420p",
+        "description": "Balanced for Telegram sharing"
+    },
+    "high": {
+        "name": "🎯 High Quality",
+        "resolution": "1280x720",
+        "preset": "slow",
+        "crf": "18",
+        "codec": "libx264",
+        "pixel_format": "yuv420p",
+        "description": "Best quality, larger size"
+    }
+}
 
 class CompressionState:
     def __init__(self):
         self.file_id = None
         self.file_name = None
         self.message = None
+        self.task_id = None
         self.resolution = "720x480"
         self.preset = "medium"
         self.crf = "23"
@@ -101,43 +92,153 @@ class CompressionState:
         self.output_format = "video"
         self.waiting_for_filename = False
         self.start_time = None
-        self.progress_tracker = ProgressTracker()
 
-def format_size(size):
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if size < 1024:
-            return f"{size:.2f} {unit}"
-        size /= 1024
-    return f"{size:.2f} TB"
+class CompressionTasks:
+    def __init__(self):
+        self.tasks = {}
+        self.max_tasks = 3
 
-def create_progress_bar(progress, length=20):
-    filled_length = int(length * progress / 100)
-    bar = '█' * filled_length + '░' * (length - filled_length)
-    return bar
+    def add_task(self, user_id, task_id, state):
+        if user_id not in self.tasks:
+            self.tasks[user_id] = {}
+        if len(self.tasks[user_id]) >= self.max_tasks:
+            return False
+        self.tasks[user_id][task_id] = state
+        return True
+
+    def remove_task(self, user_id, task_id):
+        if user_id in self.tasks and task_id in self.tasks[user_id]:
+            del self.tasks[user_id][task_id]
+            if not self.tasks[user_id]:
+                del self.tasks[user_id]
+
+    def get_task(self, user_id, task_id):
+        return self.tasks.get(user_id, {}).get(task_id)
+
+    def get_user_tasks_count(self, user_id):
+        return len(self.tasks.get(user_id, {}))
+
+compression_tasks = CompressionTasks()
 
 app = Client("video_compress_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
+def format_size(size):
+    try:
+        size = float(abs(size))
+        if size == 0:
+            return "0B"
+        units = ['B', 'KB', 'MB', 'GB', 'TB']
+        i = 0
+        while size >= 1024.0 and i < len(units)-1:
+            size /= 1024.0
+            i += 1
+        return f"{size:.2f} {units[i]}"
+    except Exception as e:
+        print(f"Size format error: {str(e)}")
+        return "0B"
+
+def create_progress_bar(current, total, length=20):
+    """Create a progress bar with filled and empty portions"""
+    try:
+        current = float(current)
+        total = float(total)
+        percentage = min(100, (current * 100) / total) if total > 0 else 0
+        filled_length = int(length * (percentage / 100))
+        
+        # Create the progress bar with clear visual distinction
+        bar = '■' * filled_length + '□' * (length - filled_length)
+        # Return formatted progress bar with percentage
+        return f"`{bar}` {percentage:.1f}%"
+    except Exception as e:
+        print(f"Progress bar error: {str(e)}")
+        return f"`{'□' * length}` 0%"
+
+def create_theme_menu(task_id):
+    buttons = [
+        [
+            InlineKeyboardButton("📱 Mobile Saver", callback_data=f"theme:{task_id}:mobile"),
+            InlineKeyboardButton("📬 Telegram", callback_data=f"theme:{task_id}:telegram")
+        ],
+        [
+            InlineKeyboardButton("🎯 High Quality", callback_data=f"theme:{task_id}:high"),
+            InlineKeyboardButton("⚙️ Custom", callback_data=f"theme:{task_id}:custom")
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{task_id}")]
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+def create_custom_menu(task_id):
+    buttons = [
+        [InlineKeyboardButton("📐 Resolution", callback_data=f"custom:{task_id}:resolution")],
+        [InlineKeyboardButton("⚡ Preset", callback_data=f"custom:{task_id}:preset")],
+        [InlineKeyboardButton("🎯 Quality (CRF)", callback_data=f"custom:{task_id}:crf")],
+        [InlineKeyboardButton("✅ Confirm Settings", callback_data=f"custom:{task_id}:confirm")],
+        [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{task_id}")]
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+async def show_format_selection(message, theme_name, task_id):
+    buttons = [
+        [
+            InlineKeyboardButton("📹 Video", callback_data=f"format:{task_id}:video"),
+            InlineKeyboardButton("📄 Document", callback_data=f"format:{task_id}:document")
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{task_id}")]
+    ]
+    await message.edit_text(
+        f"🎯 **Selected: {theme_name}**\n\n"
+        "Choose output format:\n\n"
+        "📹 **Video** - Send as video message\n"
+        "📄 **Document** - Send as file",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
 @app.on_message(filters.command("start"))
 async def start_command(client, message):
-    welcome_text = (
-        "🎥 **Welcome to Video Compression Bot!**\n\n"
-        "Send me any video to start compression.\n\n"
-        "Available commands:\n"
-        "/start - Show this message\n"
-        "/help - Show help message\n"
-        "/cancel - Cancel current operation"
-    )
-    await message.reply_text(welcome_text)
+    try:
+        welcome_text = (
+            "🎥 **Welcome to Video Compression Bot!**\n\n"
+            "I can help you compress videos with various settings:\n\n"
+            "📱 **Mobile Data Saver**\n"
+            "• Smallest file size\n"
+            "• Good for mobile data\n\n"
+            "📬 **Telegram Optimized**\n"
+            "• Balanced quality\n"
+            "• Perfect for sharing\n\n"
+            "🎯 **High Quality**\n"
+            "• Best quality\n"
+            "• Larger file size\n\n"
+            "⚙️ **Custom Settings**\n"
+            "• Choose your own settings\n\n"
+            "Send me any video to start! 🚀"
+        )
+        await message.reply_text(welcome_text)
+    except Exception as e:
+        print(f"Start command error: {str(e)}")
+        await message.reply_text("❌ An error occurred. Please try again.")
 
 @app.on_message(filters.video | filters.document)
-async def handle_video(client, message):
+async def handle_video(client: Client, message: Message):
     try:
+        user_id = message.from_user.id
+        task_id = str(int(time.time()))  # Unique task ID based on timestamp
+        
+        if compression_tasks.get_user_tasks_count(user_id) >= compression_tasks.max_tasks:
+            await message.reply_text(
+                f"⚠️ Maximum concurrent tasks ({compression_tasks.max_tasks}) reached.\n"
+                "Please wait for some tasks to complete first."
+            )
+            return
+        
         state = CompressionState()
         
         if message.video:
             state.file_id = message.video.file_id
             state.file_name = message.video.file_name or "video.mp4"
             file_size = message.video.file_size
+            duration = message.video.duration
+            width = message.video.width
+            height = message.video.height
         else:
             if not message.document.mime_type or not message.document.mime_type.startswith("video/"):
                 await message.reply_text("❌ Please send a valid video file.")
@@ -146,289 +247,498 @@ async def handle_video(client, message):
             state.file_id = message.document.file_id
             state.file_name = message.document.file_name or "video.mp4"
             file_size = message.document.file_size
+            duration = 0
+            width = height = 0
         
         if file_size > 2_000_000_000:  # 2GB limit
             await message.reply_text("❌ File too large. Maximum size: 2GB")
             return
         
         state.message = message
+        state.task_id = task_id
         
-        # Create resolution selection buttons
-        buttons = []
-        for name, value in RESOLUTIONS.items():
-            buttons.append([InlineKeyboardButton(name, callback_data=f"res:{value}")])
-        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
-        
-        await message.reply_text(
-            f"🎥 **Select Output Resolution**\n\n"
-            f"Current file size: {format_size(file_size)}\n"
-            f"Filename: {state.file_name}",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-        
+        if compression_tasks.add_task(user_id, task_id, state):
+            info_text = (
+                f"🎥 **Task ID:** `{task_id}`\n\n"
+                "📽️ **Video Information**\n\n"
+                f"📁 **Filename:** `{state.file_name}`\n"
+                f"💾 **Size:** {format_size(file_size)}\n"
+                f"⏱️ **Duration:** {duration} seconds\n"
+                f"📐 **Resolution:** {width}x{height}\n\n"
+                "**Choose a Compression Theme:**"
+            )
+            
+            await message.reply_text(
+                info_text,
+                reply_markup=create_theme_menu(task_id)
+            )
+        else:
+            await message.reply_text("❌ Failed to start compression task. Please try again.")
+    
     except Exception as e:
-        await message.reply_text(f"❌ Error: {str(e)}")
+        error_text = f"❌ Error processing video: {str(e)}"
+        print(error_text)
+        await message.reply_text(error_text)
+
+@app.on_message(filters.command("cancel"))
+async def cancel_command(client, message):
+    user_id = message.from_user.id
+    if user_id in compression_tasks.tasks:
+        for task_id in list(compression_tasks.tasks[user_id].keys()):
+            compression_tasks.remove_task(user_id, task_id)
+        await message.reply_text(
+            "✅ **All Compression Tasks Cancelled**\n\n"
+            "Send another video to start again!"
+        )
+    else:
+        await message.reply_text(
+            "❌ **No Active Compression**\n\n"
+            "Send a video to start compression!"
+        )
 
 @app.on_callback_query()
-async def handle_callback(client, callback_query):
+async def handle_callback(client: Client, callback: CallbackQuery):
     try:
-        data = callback_query.data
-        message = callback_query.message
+        user_id = callback.from_user.id
+        data = callback.data
         
-        if data == "cancel":
-            await message.edit_text("❌ Operation cancelled")
+        # Extract task_id from callback data
+        if ":" not in data:
+            await callback.answer("Invalid callback data", show_alert=True)
             return
             
-        if data.startswith("res:"):
-            resolution = data.split(":")[1]
-            # Create preset selection buttons
-            buttons = []
-            for name, value in PRESETS.items():
-                buttons.append([InlineKeyboardButton(name, callback_data=f"preset:{value}")])
-            buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
+        action, task_id, *params = data.split(":")
+        state = compression_tasks.get_task(user_id, task_id)
+        
+        if not state:
+            await callback.answer("Task not found or expired", show_alert=True)
+            return
+        
+        if action == "cancel":
+            compression_tasks.remove_task(user_id, task_id)
+            await callback.message.edit_text("❌ Operation cancelled.")
+            return
+        
+        elif action == "theme":
+            theme_id = params[0]
+            if theme_id == "custom":
+                await callback.message.edit_text(
+                    "⚙️ **Custom Compression Settings**\n\n"
+                    "Select what you want to configure:",
+                    reply_markup=create_custom_menu(task_id)
+                )
+            else:
+                theme = THEMES[theme_id]
+                state.resolution = theme["resolution"]
+                state.preset = theme["preset"]
+                state.crf = theme["crf"]
+                state.codec = theme["codec"]
+                state.pixel_format = theme["pixel_format"]
+                
+                await show_format_selection(callback.message, theme["name"], task_id)
+        
+        elif action == "custom":
+            setting = params[0]
+            if setting == "resolution":
+                buttons = [[InlineKeyboardButton(name, callback_data=f"res:{task_id}:{value}")] 
+                          for name, value in RESOLUTIONS.items()]
+                buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"custom:{task_id}:back")])
+                await callback.message.edit_text(
+                    "📐 **Select Output Resolution:**\n\n"
+                    "Lower resolution = Smaller file size\n"
+                    "Higher resolution = Better quality",
+                    reply_markup=InlineKeyboardMarkup(buttons)
+                )
             
-            await message.edit_text(
-                "⚙️ **Select Encoding Preset**\n\n"
-                "Faster = Larger file size\n"
-                "Slower = Better compression",
-                reply_markup=InlineKeyboardMarkup(buttons)
+            elif setting == "preset":
+                buttons = [[InlineKeyboardButton(name, callback_data=f"preset:{task_id}:{value}")] 
+                          for name, value in PRESETS.items()]
+                buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"custom:{task_id}:back")])
+                await callback.message.edit_text(
+                    "⚡ **Select Encoding Preset:**\n\n"
+                    "Faster = Larger file size\n"
+                    "Slower = Better compression",
+                    reply_markup=InlineKeyboardMarkup(buttons)
+                )
+            
+            elif setting == "crf":
+                buttons = [[InlineKeyboardButton(name, callback_data=f"crf:{task_id}:{value}")] 
+                          for name, value in CRF_VALUES.items()]
+                buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"custom:{task_id}:back")])
+                await callback.message.edit_text(
+                    "🎯 **Select Quality (CRF Value):**\n\n"
+                    "Lower value = Better quality, larger size\n"
+                    "Higher value = Lower quality, smaller size",
+                    reply_markup=InlineKeyboardMarkup(buttons)
+                )
+            
+            elif setting == "confirm":
+                await show_format_selection(callback.message, "Custom Settings", task_id)
+            
+            elif setting == "back":
+                await callback.message.edit_text(
+                    "⚙️ **Custom Compression Settings**\n\n"
+                    "Select what you want to configure:",
+                    reply_markup=create_custom_menu(task_id)
+                )
+        
+        elif action in ["res", "preset", "crf"]:
+            value = params[0]
+            if action == "res":
+                state.resolution = value
+            elif action == "preset":
+                state.preset = value
+            elif action == "crf":
+                state.crf = value
+            
+            await callback.message.edit_text(
+                "⚙️ **Custom Compression Settings**\n\n"
+                f"Current Settings:\n"
+                f"• Resolution: {state.resolution}\n"
+                f"• Preset: {state.preset}\n"
+                f"• CRF: {state.crf}\n\n"
+                "Select what you want to configure:",
+                reply_markup=create_custom_menu(task_id)
             )
-            
-        elif data.startswith("preset:"):
-            preset = data.split(":")[1]
-            # Create CRF selection buttons
-            buttons = []
-            for name, value in CRF_VALUES.items():
-                buttons.append([InlineKeyboardButton(name, callback_data=f"crf:{value}")])
-            buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
-            
-            await message.edit_text(
-                "🎯 **Select Quality (CRF Value)**\n\n"
-                "Lower value = Better quality, larger size\n"
-                "Higher value = Lower quality, smaller size",
-                reply_markup=InlineKeyboardMarkup(buttons)
+        
+        elif action == "format":
+            state.output_format = params[0]
+            await callback.message.edit_text(
+                "📝 **Enter Custom Filename**\n\n"
+                "• Send new filename\n"
+                "• Or send /skip to keep original name\n\n"
+                "Note: Include file extension (.mp4, .mkv, etc.)"
             )
-            
-        elif data.startswith("crf:"):
-            crf = data.split(":")[1]
-            # Start compression
-            await message.edit_text(
-                "🎯 **Starting Compression**\n\n"
-                "Please wait while I process your video..."
-            )
-            # Start the compression process
-            await start_compression(client, message, crf)
-            
+            state.waiting_for_filename = True
+        
+        await callback.answer()
+        
     except Exception as e:
-        await message.edit_text(f"❌ Error: {str(e)}")
+        error_text = f"❌ Callback error: {str(e)}"
+        print(error_text)
+        await callback.answer(error_text, show_alert=True)
+        if user_id in compression_tasks.tasks and task_id in compression_tasks.tasks[user_id]:
+            compression_tasks.remove_task(user_id, task_id)
 
-async def start_compression(client, message, crf):
+@app.on_message(filters.text & filters.private)
+async def handle_filename(client: Client, message: Message):
     try:
-        # Download video
-        progress_msg = await message.reply_text("📥 **Downloading video...**")
+        user_id = message.from_user.id
         
-        input_file = f"downloads/input_{int(time.time())}.mp4"
-        output_file = f"downloads/output_{int(time.time())}.mp4"
+        # Find the user's task that's waiting for filename
+        user_tasks = compression_tasks.tasks.get(user_id, {})
+        active_task = None
+        task_id = None
         
-        await client.download_media(
-            message.reply_to_message,
-            input_file,
-            progress=progress_callback,
-            progress_args=(progress_msg, "Downloading")
+        for tid, task in user_tasks.items():
+            if task.waiting_for_filename:
+                active_task = task
+                task_id = tid
+                break
+        
+        if not active_task:
+            return
+        
+        if message.text == "/skip":
+            active_task.custom_name = active_task.file_name
+        else:
+            active_task.custom_name = message.text
+            if not any(active_task.custom_name.lower().endswith(ext) 
+                      for ext in ['.mp4', '.mkv', '.avi', '.mov']):
+                active_task.custom_name += '.mp4'
+        
+        await message.reply_text(
+            "🎯 **Starting Compression Process**\n\n"
+            "Please wait while I process your video..."
+        )
+        await start_compression(client, active_task)
+        
+    except Exception as e:
+        error_text = f"❌ Error processing filename: {str(e)}"
+        print(error_text)
+        await message.reply_text(error_text)
+        if task_id:
+            compression_tasks.remove_task(user_id, task_id)
+
+async def progress_callback(current, total, message, start_time, action):
+    try:
+        now = time.time()
+        elapsed_time = max(1, now - start_time)  # Prevent division by zero
+        
+        # Update only every 2 seconds to avoid FloodWait
+        if hasattr(message, 'last_update') and (now - message.last_update) < 2:
+            return
+        message.last_update = now
+
+        # Calculate progress metrics
+        percentage = min(100, (current * 100) / total) if total else 0
+        speed = current / elapsed_time  # bytes per second
+        
+        # Calculate ETA
+        if speed > 0:
+            eta = (total - current) / speed
+        else:
+            eta = 0
+
+        # Create progress bar with percentage
+        progress_bar = create_progress_bar(current, total)
+        
+        # Format sizes and speed
+        current_size = format_size(current)
+        total_size = format_size(total)
+        speed_text = format_size(speed)
+
+        # Format time strings
+        elapsed = time.strftime('%H:%M:%S', time.gmtime(elapsed_time))
+        eta_time = time.strftime('%H:%M:%S', time.gmtime(eta))
+
+        # Create progress text with clear formatting
+        text = (
+            f"**{action}**\n\n"
+            f"📊 **Progress:** {progress_bar}\n\n"
+            f"🚀 **Speed:** `{speed_text}/s`\n"
+            f"⏱️ **Elapsed:** `{elapsed}`\n"
+            f"⏳ **ETA:** `{eta_time}`\n"
+            f"📦 **Size:** `{current_size} / {total_size}`"
         )
         
-        # Start compression
-        await progress_msg.edit_text("🎯 **Compressing video...**")
+        try:
+            await message.edit_text(text)
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            
+    except Exception as e:
+        print(f"Progress callback error: {str(e)}")
+
+async def start_compression(client: Client, state: CompressionState):
+    progress_msg = await state.message.reply_text(
+        "⚙️ **Initializing Compression Process**\n\n"
+        "🔄 Preparing your video..."
+    )
+    start_time = time.time()
+    input_file = output_file = thumbnail = None
+    
+    try:
+        # Download video
+        try:
+            await progress_msg.edit_text("📥 **Download Started**\n\nDownloading your video file...")
+            input_file = await client.download_media(
+                state.file_id,
+                progress=progress_callback,
+                progress_args=(progress_msg, start_time, "Downloading Video")
+            )
+            
+            if not input_file:
+                raise Exception("Download failed")
+            
+        except FloodWait as e:
+            await progress_msg.edit_text(f"⚠️ Rate limited. Waiting for {e.value} seconds...")
+            await asyncio.sleep(e.value)
+            raise Exception("Download retry needed")
+        except Exception as e:
+            raise Exception(f"Download failed: {str(e)}")
+
+        # Get video information and create thumbnail
+        await progress_msg.edit_text("🔍 **Analyzing Video...**")
         
+        try:
+            # Get video information using FFprobe
+            probe = await asyncio.create_subprocess_exec(
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration:stream=width,height,codec_name",
+                "-of", "json",
+                input_file,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await probe.communicate()
+            video_info = json.loads(stdout.decode('utf-8'))
+            
+            duration = float(video_info['format']['duration'])
+            
+            # Extract thumbnail
+            await progress_msg.edit_text("🖼️ **Extracting Thumbnail...**")
+            thumbnail = f"thumb_{os.path.basename(input_file)}.jpg"
+            
+            thumb_cmd = [
+                "ffmpeg", "-ss", str(duration/2),
+                "-i", input_file,
+                "-vframes", "1",
+                "-vf", "scale=320:-1",
+                "-q:v", "2",
+                thumbnail
+            ]
+            
+            process = await asyncio.create_subprocess_exec(
+                *thumb_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await process.communicate()
+            
+            if not os.path.exists(thumbnail):
+                print("Thumbnail extraction failed, continuing without thumbnail")
+                thumbnail = None
+            
+        except Exception as e:
+            print(f"Video info/thumbnail error: {str(e)}")
+            duration = 0
+            thumbnail = None
+
+        # Start compression
+        output_file = f"compressed_{state.custom_name}"
+        
+        compression_text = (
+            "🎯 **Starting Compression**\n\n"
+            f"⚙️ **Settings:**\n"
+            f"• Resolution: {state.resolution}\n"
+            f"• Preset: {state.preset}\n"
+            f"• CRF: {state.crf}\n"
+            f"• Codec: {state.codec}\n"
+            f"• Pixel Format: {state.pixel_format}\n\n"
+            "⏳ Compressing... Please wait..."
+        )
+        await progress_msg.edit_text(compression_text)
+
+        # FFmpeg compression command
         ffmpeg_cmd = [
             "ffmpeg", "-i", input_file,
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", crf,
+            "-c:v", state.codec,
+            "-preset", state.preset,
+            "-crf", str(state.crf),
+            "-vf", f"scale={state.resolution}",
+            "-pix_fmt", state.pixel_format,
             "-c:a", "aac",
             "-b:a", "128k",
+            "-movflags", "+faststart",
+            "-y",
             output_file
         ]
-        
+
+        # Start compression process
         process = await asyncio.create_subprocess_exec(
             *ffmpeg_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
+
+        # Process FFmpeg output
+        while True:
+            try:
+                stderr_line = await process.stderr.readline()
+                if not stderr_line:
+                    break
+                
+                line = stderr_line.decode('utf-8', errors='replace').strip()
+                
+                if 'time=' in line:
+                    time_match = re.search(r'time=(\d+:\d+:\d+.\d+)', line)
+                    fps_match = re.search(r'fps=\s*(\d+)', line)
+                    speed_match = re.search(r'speed=\s*(\d+\.?\d*x)', line)
+                    
+                    progress_text = (
+                        "🎯 **Compressing Video**\n\n"
+                        f"⏱️ Time: {time_match.group(1) if time_match else 'N/A'}\n"
+                        f"🎞️ FPS: {fps_match.group(1) if fps_match else 'N/A'}\n"
+                        f"⚡ Speed: {speed_match.group(1) if speed_match else 'N/A'}\n\n"
+                        "Please wait..."
+                    )
+                    try:
+                        await progress_msg.edit_text(progress_text)
+                    except Exception as e:
+                        print(f"Progress update error: {str(e)}")
+                
+            except Exception as e:
+                print(f"FFmpeg output processing error: {str(e)}")
+                continue
+
+        # Wait for process to complete
+        return_code = await process.wait()
+        if return_code != 0:
+            raise Exception(f"FFmpeg process failed with return code {return_code}")
+
+        # Get file sizes for comparison
+        original_size = os.path.getsize(input_file)
+        compressed_size = os.path.getsize(output_file)
+
+        # Upload the compressed video
+        await progress_msg.edit_text("📤 **Starting Upload...**")
         
-        await process.communicate()
+        upload_start_time = time.time()
         
-        # Upload compressed video
-        await progress_msg.edit_text("📤 **Uploading compressed video...**")
-        
-        await client.send_video(
-            message.chat.id,
-            output_file,
-            progress=progress_callback,
-            progress_args=(progress_msg, "Uploading")
+        try:
+            caption = (
+                f"🎥 **{state.custom_name}**\n\n"
+                f"🎯 **Compression Info:**\n"
+                f"• Resolution: {state.resolution}\n"
+                f"• Preset: {state.preset}\n"
+                f"• CRF: {state.crf}\n"
+                f"• Original Size: {format_size(original_size)}\n"
+                f"• Compressed Size: {format_size(compressed_size)}\n"
+                f"• Space Saved: {((original_size - compressed_size) / original_size) * 100:.1f}%"
+            )
+
+            if state.output_format == "video":
+                await client.send_video(
+                    state.message.chat.id,
+                    output_file,
+                    thumb=thumbnail,
+                    duration=int(duration),
+                    caption=caption,
+                    progress=progress_callback,
+                    progress_args=(progress_msg, upload_start_time, "Uploading Video")
+                )
+            else:
+                await client.send_document(
+                    state.message.chat.id,
+                    output_file,
+                    thumb=thumbnail,
+                    caption=caption,
+                    progress=progress_callback,
+                    progress_args=(progress_msg, upload_start_time, "Uploading File")
+                )
+
+            # Show completion message
+            time_taken = time.time() - start_time
+            completion_text = (
+                "✅ **Compression Complete!**\n\n"
+                f"📊 **Statistics:**\n"
+                f"• Original Size: {format_size(original_size)}\n"
+                f"• Compressed Size: {format_size(compressed_size)}\n"
+                f"• Space Saved: {((original_size - compressed_size) / original_size) * 100:.1f}%\n"
+                f"• Time Taken: {time.strftime('%H:%M:%S', time.gmtime(time_taken))}\n\n"
+                "🔄 Send another video to compress again!"
+            )
+            await progress_msg.edit_text(completion_text)
+
+        except FloodWait as e:
+            await progress_msg.edit_text(f"⚠️ Upload rate limited. Waiting for {e.value} seconds...")
+            await asyncio.sleep(e.value)
+            raise Exception("Upload retry needed")
+        except Exception as e:
+            raise Exception(f"Upload failed: {str(e)}")
+
+    except Exception as main_error:
+        error_text = (
+            "❌ **Compression Failed**\n\n"
+            f"Error: `{str(main_error)}`\n\n"
+            "Please try again or contact support."
         )
+        await progress_msg.edit_text(error_text)
         
-        await progress_msg.edit_text("✅ **Compression complete!**")
-        
-    except Exception as e:
-        await message.reply_text(f"❌ Error: {str(e)}")
     finally:
         # Cleanup
         try:
-            os.remove(input_file)
-            os.remove(output_file)
-        except:
-            pass
-
-async def progress_callback(current, total, message, action):
-    try:
-        progress = (current * 100) / total
-        progress_bar = create_progress_bar(progress)
+            for file in [input_file, output_file, thumbnail]:
+                if file and os.path.exists(file):
+                    os.remove(file)
+        except Exception as e:
+            print(f"Cleanup error: {str(e)}")
         
-        status_text = (
-            f"**{action} Video**\n\n"
-            f"💫 **Progress:** {progress:.1f}%\n"
-            f"{progress_bar}\n"
-            f"📊 **Size:** {format_size(current)} / {format_size(total)}"
-        )
-        
-        try:
-            await message.edit_text(status_text)
-        except FloodWait as e:
-            await asyncio.sleep(e.value)
-        except Exception:
-            pass
-            
-    except Exception as e:
-        print(f"Progress callback error: {str(e)}")
+        # Clear task
+        if state.message.from_user.id in compression_tasks.tasks:
+            compression_tasks.remove_task(state.message.from_user.id, state.task_id)
 
-@app.on_message(filters.command("help"))
-async def help_command(client, message):
-    help_text = (
-        "📖 **Video Compression Bot Help**\n\n"
-        "This bot helps you compress videos with custom settings.\n\n"
-        "**How to use:**\n"
-        "1. Send any video file\n"
-        "2. Select resolution\n"
-        "3. Choose encoding preset\n"
-        "4. Select quality (CRF value)\n"
-        "5. Wait for compression to complete\n\n"
-        "**Commands:**\n"
-        "/start - Start the bot\n"
-        "/help - Show this help message\n"
-        "/cancel - Cancel current operation\n\n"
-        "**Notes:**\n"
-        "• Maximum file size: 2GB\n"
-        "• Supported formats: MP4, AVI, MKV, MOV\n"
-        "• Higher CRF = Smaller size but lower quality\n"
-        "• Slower preset = Better compression but takes longer"
-    )
-    await message.reply_text(help_text)
-
-@app.on_message(filters.command("cancel"))
-async def cancel_command(client, message):
-    # Implementation depends on how you want to handle cancellation
-    await message.reply_text("❌ Operation cancelled")
-
-def create_custom_menu(task_id):
-    buttons = [
-        [
-            InlineKeyboardButton("📐 Resolution", callback_data=f"custom:{task_id}:resolution"),
-            InlineKeyboardButton("⚡ Preset", callback_data=f"custom:{task_id}:preset")
-        ],
-        [
-            InlineKeyboardButton("🎯 Quality", callback_data=f"custom:{task_id}:crf"),
-            InlineKeyboardButton("✅ Confirm", callback_data=f"custom:{task_id}:confirm")
-        ],
-        [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{task_id}")]
-    ]
-    return InlineKeyboardMarkup(buttons)
-
-async def get_video_duration(file_path):
-    try:
-        cmd = [
-            "ffprobe",
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "json",
-            file_path
-        ]
-        
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        stdout, stderr = await process.communicate()
-        data = json.loads(stdout.decode())
-        return float(data['format']['duration'])
-    except Exception as e:
-        print(f"Error getting video duration: {str(e)}")
-        return 0
-
-async def create_video_thumbnail(input_file, duration):
-    try:
-        thumbnail_path = f"downloads/thumb_{int(time.time())}.jpg"
-        cmd = [
-            "ffmpeg",
-            "-ss", str(duration/2),
-            "-i", input_file,
-            "-vframes", "1",
-            "-vf", "scale=320:-1",
-            "-y",
-            thumbnail_path
-        ]
-        
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        await process.communicate()
-        
-        if os.path.exists(thumbnail_path):
-            return thumbnail_path
-        return None
-    except Exception as e:
-        print(f"Error creating thumbnail: {str(e)}")
-        return None
-
-class CompressionQueue:
-    def __init__(self):
-        self.queue = asyncio.Queue()
-        self.processing = False
-        
-    async def add_task(self, task):
-        await self.queue.put(task)
-        if not self.processing:
-            asyncio.create_task(self.process_queue())
-    
-    async def process_queue(self):
-        self.processing = True
-        while not self.queue.empty():
-            task = await self.queue.get()
-            try:
-                await task
-            except Exception as e:
-                print(f"Task error: {str(e)}")
-            finally:
-                self.queue.task_done()
-        self.processing = False
-
-compression_queue = CompressionQueue()
-
-def main():
-    print("🤖 Bot is starting...")
-    try:
-        # Create downloads directory if it doesn't exist
-        os.makedirs("downloads", exist_ok=True)
-        
-        # Start the bot
-        app.run()
-    except Exception as e:
-        print(f"❌ Error starting bot: {str(e)}")
-
-if __name__ == "__main__":
-    main()
+# Start the bot
+print("🤖 Bot is running...")
+app.run()
