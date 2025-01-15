@@ -50,17 +50,23 @@ class ProgressTracker:
         
         self.last_update_time = now
         
-        # Calculate progress
-        percentage = current * 100 / total
-        filled_length = int(50 * current // total)
-        bar = '█' * filled_length + '░' * (50 - filled_length)
+        # Handle cases where total is 0 or None
+        if not total or total <= 0:
+            total = current + 1  # Prevent division by zero
+            percentage = 0
+            bar = '░' * 50  # Show empty progress bar
+        else:
+            # Calculate progress
+            percentage = min((current * 100 / total), 100)
+            filled_length = int(50 * current // total)
+            bar = '█' * filled_length + '░' * (50 - filled_length)
         
         # Calculate speed
-        elapsed_time = now - self.start_time
-        speed = current / elapsed_time if elapsed_time > 0 else 0
+        elapsed_time = max(now - self.start_time, 0.01)  # Prevent division by zero
+        speed = current / elapsed_time
         
         # Calculate ETA
-        if speed > 0:
+        if speed > 0 and total > current:
             eta = (total - current) / speed
             eta_str = time.strftime('%H:%M:%S', time.gmtime(eta))
         else:
@@ -68,12 +74,12 @@ class ProgressTracker:
 
         # Format sizes
         current_size = format_size(current)
-        total_size = format_size(total)
+        total_size = "Unknown" if not total or total <= 0 else format_size(total)
         speed_str = f"{format_size(speed)}/s"
 
         # Create progress text
         progress_text = (
-            f"[{self.process_type}] {self.message.document.file_name}\n"
+            f"[{self.process_type}] {os.path.basename(str(self.message.document.file_name))}\n"
             f"[{bar}]\n"
             f"Progress: {percentage:.1f}%\n"
             f"Size: {current_size} of {total_size}\n"
@@ -85,8 +91,8 @@ class ProgressTracker:
             try:
                 await self.message.edit_text(progress_text)
                 self.last_edited_text = progress_text
-            except:
-                pass
+            except Exception as e:
+                print(f"Error updating progress: {str(e)}")
 
 def format_size(size):
     units = ['B', 'KB', 'MB', 'GB', 'TB']
