@@ -1,134 +1,186 @@
 import os
-import asyncio
+import ffmpeg
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
-import subprocess
-from tqdm import tqdm
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from time import time, sleep
+
+# Bot API configuration
 API_ID = "16501053" 
 API_HASH = "d8c9b01c863dabacc484c2c06cdd0f6e" 
 BOT_TOKEN = "8125717355:AAGEqXec28WfZ5V_wb4bkKoSyTt_slw6x2I"
-# Initialize bot
-app = Client("compression_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Compression settings
-COMPRESSION_SETTINGS = {
-    "resolutions": {
-        "144p": "256x144", "240p": "426x240", "360p": "640x360",
-        "480p": "854x480", "720p": "1280x720", "1080p": "1920x1080",
-        "4K": "3840x2160"
-    },
-    "presets": ["ultrafast", "superfast", "fast", "medium", "slow"],
-    "crf": range(15, 31),
-    "pixel_formats": ["yuv420p", "yuv422p", "yuv444p"],
-    "codecs": ["libx264", "libx265"]
-}
+app = Client("compressor_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Progress callback
-async def progress(current, total, message, operation):
-    try:
-        percent = (current * 100) / total
-        progress_bar = "".join("█" for _ in range(int(percent/5)))
-        await message.edit_text(
-            f"{operation} Progress:\n"
-            f"[{progress_bar:<20}] {percent:.1f}%"
-        )
-    except Exception:
-        pass
+# Global dictionary to store user-specific data
+user_data = {}
 
-# Extract thumbnail from video
-def extract_thumbnail(video_path):
-    output_path = f"{video_path}_thumb.jpg"
-    duration = float(subprocess.check_output([
-        'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-        '-of', 'default=noprint_wrappers=1:nokey=1', video_path
-    ]).decode('utf-8'))
-    
-    middle_time = duration / 2
-    subprocess.call([
-        'ffmpeg', '-ss', str(middle_time), '-i', video_path,
-        '-vframes', '1', '-s', '320x320', '-f', 'image2', output_path
-    ])
-    return output_path
 
-# Compress video using FFmpeg
-async def compress_video(input_path, output_path, settings):
-    command = [
-        'ffmpeg', '-i', input_path,
-        '-c:v', settings['codec'],
-        '-preset', settings['preset'],
-        '-crf', str(settings['crf']),
-        '-vf', f'scale={settings["resolution"]}',
-        '-pix_fmt', settings['pixel_format'],
-        '-c:a', 'aac',
-        output_path
+# Helper Functions
+def compression_menu():
+    """Generate compression settings menu."""
+    buttons = [
+        [InlineKeyboardButton("144p", callback_data="res_144"), InlineKeyboardButton("240p", callback_data="res_240")],
+        [InlineKeyboardButton("360p", callback_data="res_360"), InlineKeyboardButton("480p", callback_data="res_480")],
+        [InlineKeyboardButton("720p", callback_data="res_720"), InlineKeyboardButton("1080p", callback_data="res_1080")],
+        [InlineKeyboardButton("4K", callback_data="res_4k")],
+        [InlineKeyboardButton("Confirm", callback_data="confirm"), InlineKeyboardButton("Cancel", callback_data="cancel")],
     ]
-    process = await asyncio.create_subprocess_exec(*command)
-    await process.wait()
+    return InlineKeyboardMarkup(buttons)
 
+
+def upload_menu():
+    """Generate upload format menu."""
+    buttons = [
+        [InlineKeyboardButton("Document", callback_data="upload_document"), InlineKeyboardButton("Video", callback_data="upload_video")],
+        [InlineKeyboardButton("Confirm", callback_data="upload_confirm"), InlineKeyboardButton("Cancel", callback_data="cancel")],
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
+async def progress_bar(current, total, last_update, message: Message, stage: str):
+    """Update progress bar every 2 seconds."""
+    now = time()
+    if now - last_update >= 2:  # Only update every 2 seconds
+        percent = (current / total) * 100
+        bar = f"[{'█' * int(percent // 5)}{' ' * (20 - int(percent // 5))}] {percent:.2f}%"
+        await message.edit_text(f"{stage}:\n{bar}")
+        return now
+    return last_update
+
+
+# Event Handlers
 @app.on_message(filters.video | filters.document)
-async def handle_video(client, message):
-    # Initial compression menu
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Compress", callback_data="compress")],
-        [InlineKeyboardButton("Cancel", callback_data="cancel")]
-    ])
-    await message.reply_text("Choose an action:", reply_markup=keyboard)
+async def handle_media(client, message: Message):
+    """Handle received video or document."""
+    file_id = message.video.file_id if message.video else message.document.file_id
+    user_data[message.from_user.id] = {"file_id": file_id}
+    await message.reply("Choose compression settings:", reply_markup=compression_menu())
+
 
 @app.on_callback_query()
-async def handle_callback(client, callback_query: CallbackQuery):
+async def handle_callback(client, callback_query):
+    """Handle callback queries for settings and confirmation."""
+    user_id = callback_query.from_user.id
+    if user_id not in user_data:
+        await callback_query.answer("Please send a video or document first.")
+        return
+
     data = callback_query.data
-    
-    if data == "compress":
-        # Show compression settings menu
-        settings_keyboard = create_settings_menu()
-        await callback_query.message.edit_text(
-            "Select compression settings:",
-            reply_markup=settings_keyboard
-        )
-    elif data == "confirm_settings":
-        # Handle video processing
-        status_message = await callback_query.message.reply_text("Processing started...")
-        
-        # Download video
-        video_path = await client.download_media(
-            callback_query.message.reply_to_message,
-            progress=progress,
-            progress_args=(status_message, "Downloading")
-        )
-        
-        # Extract thumbnail
-        thumb_path = extract_thumbnail(video_path)
-        
-        # Compress video
-        output_path = f"compressed_{os.path.basename(video_path)}"
-        await compress_video(video_path, output_path, callback_query.message.settings)
-        
-        # Upload processed video
-        await client.send_video(
-            callback_query.message.chat.id,
-            output_path,
-            thumb=thumb_path,
-            caption=f"Compressed video\nSettings: {str(callback_query.message.settings)}",
-            progress=progress,
-            progress_args=(status_message, "Uploading")
-        )
-        
-        # Cleanup
-        os.remove(video_path)
-        os.remove(output_path)
-        os.remove(thumb_path)
-        await status_message.delete()
+    if data.startswith("res_"):
+        resolution = data.split("_")[1]
+        user_data[user_id]["resolution"] = resolution
+        await callback_query.answer(f"Selected resolution: {resolution}")
+    elif data == "confirm":
+        await callback_query.message.reply("Select upload format and filename:", reply_markup=upload_menu())
+    elif data.startswith("upload_"):
+        upload_format = data.split("_")[1]
+        user_data[user_id]["upload_format"] = upload_format
+        if upload_format == "confirm":
+            await callback_query.message.reply("Enter a new filename for the output (without extension):")
+    elif data == "cancel":
+        user_data.pop(user_id, None)
+        await callback_query.message.reply("Process cancelled.")
 
-def create_settings_menu():
-    # Create inline keyboard for compression settings
-    keyboard = []
-    for setting, options in COMPRESSION_SETTINGS.items():
-        keyboard.append([InlineKeyboardButton(
-            f"Select {setting}",
-            callback_data=f"setting_{setting}"
-        )])
-    keyboard.append([InlineKeyboardButton("Confirm", callback_data="confirm_settings")])
-    return InlineKeyboardMarkup(keyboard)
 
-# Run the bot
-app.run()
+@app.on_message(filters.text)
+async def handle_filename(client, message: Message):
+    """Handle custom filename input."""
+    user_id = message.from_user.id
+    if user_id not in user_data or "upload_format" not in user_data[user_id]:
+        return
+
+    user_data[user_id]["filename"] = message.text
+    status_message = await message.reply("Starting compression process...")
+
+    # Download file
+    file_id = user_data[user_id]["file_id"]
+    input_file = f"downloads/{file_id}.mp4"
+    output_file = f"compressed/{user_data[user_id]['filename']}.mp4"
+
+    os.makedirs("downloads", exist_ok=True)
+    os.makedirs("compressed", exist_ok=True)
+
+    await status_message.edit_text("Downloading file...")
+    last_update = time()
+    await app.download_media(
+        file_id,
+        file_name=input_file,
+        progress=lambda current, total: app.loop.create_task(
+            progress_bar(current, total, last_update, status_message, "Downloading")
+        ),
+    )
+
+    # Compress file with ffmpeg
+    resolution = user_data[user_id].get("resolution", "720")
+    width, height = {
+        "144": (256, 144),
+        "240": (426, 240),
+        "360": (640, 360),
+        "480": (854, 480),
+        "720": (1280, 720),
+        "1080": (1920, 1080),
+        "4k": (3840, 2160),
+    }.get(resolution, (1280, 720))
+
+    await status_message.edit_text(f"Compressing to {resolution}...")
+    last_update = time()
+
+    process = (
+        ffmpeg.input(input_file)
+        .output(output_file, vf=f"scale={width}:{height}", crf=23, pix_fmt="yuv420p", vcodec="libx264")
+        .run_async(pipe_stdout=True, pipe_stderr=True)
+    )
+
+    while True:
+        line = process.stderr.readline()
+        if not line:
+            break
+        last_update = await progress_bar(0, 1, last_update, status_message, "Compressing")  # Dummy progress for compression
+        sleep(2)
+
+    # Extract thumbnail
+    thumbnail = f"thumbnails/{user_data[user_id]['filename']}.jpg"
+    os.makedirs("thumbnails", exist_ok=True)
+    duration = ffmpeg.probe(output_file)["streams"][0]["duration"]
+    ffmpeg.input(output_file, ss=float(duration) / 2).output(thumbnail, vframes=1).run()
+
+    # Upload compressed file
+    await status_message.edit_text("Uploading file...")
+    last_update = time()
+    upload_params = {
+        "thumb": thumbnail,
+        "width": width,
+        "height": height,
+        "duration": int(float(duration)),
+        "caption": f"Filename: {user_data[user_id]['filename']}",
+    }
+
+    if user_data[user_id]["upload_format"] == "document":
+        await app.send_document(
+            message.chat.id,
+            output_file,
+            **upload_params,
+            progress=lambda current, total: app.loop.create_task(
+                progress_bar(current, total, last_update, status_message, "Uploading")
+            ),
+        )
+    else:
+        await app.send_video(
+            message.chat.id,
+            output_file,
+            **upload_params,
+            progress=lambda current, total: app.loop.create_task(
+                progress_bar(current, total, last_update, status_message, "Uploading")
+            ),
+        )
+
+    # Cleanup
+    os.remove(input_file)
+    os.remove(output_file)
+    os.remove(thumbnail)
+    user_data.pop(user_id, None)
+    await status_message.edit_text("Process completed!")
+
+
+if __name__ == "__main__":
+    app.run()
