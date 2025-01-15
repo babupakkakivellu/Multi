@@ -42,9 +42,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot Configuration
-API_ID = "your_api_id"
-API_HASH = "your_api_hash"
-BOT_TOKEN = "your_bot_token"
+API_ID = "16501053" 
+API_HASH = "d8c9b01c863dabacc484c2c06cdd0f6e" 
+BOT_TOKEN = "8125717355:AAGEqXec28WfZ5V_wb4bkKoSyTt_slw6x2I"
 DOWNLOAD_DIR = "downloads/"
 OWNER_ID = 123456789  # Replace with your Telegram ID
 UPDATES_CHANNEL = "your_channel_username"  # Optional: Channel username for force subscribe
