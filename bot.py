@@ -5,7 +5,7 @@ import ffmpeg
 import asyncio
 from datetime import datetime
 
-API_ID = "16501053" 
+API_ID = 16501053
 API_HASH = "d8c9b01c863dabacc484c2c06cdd0f6e" 
 BOT_TOKEN = "8125717355:AAGEqXec28WfZ5V_wb4bkKoSyTt_slw6x2I"
 
