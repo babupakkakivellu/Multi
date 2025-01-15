@@ -1,14 +1,13 @@
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 import os
-import ffmpeg
+import subprocess
 import asyncio
 from datetime import datetime
 
-API_ID = 16501053
+API_ID = "16501053" 
 API_HASH = "d8c9b01c863dabacc484c2c06cdd0f6e" 
 BOT_TOKEN = "8125717355:AAGEqXec28WfZ5V_wb4bkKoSyTt_slw6x2I"
-
 # Initialize your Telegram bot
 app = Client(
     "video_compression_bot",
@@ -35,7 +34,10 @@ RESOLUTIONS = {
 
 PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"]
 PIXEL_FORMATS = ["yuv420p", "yuv444p", "yuv422p"]
-CODECS = ["libx264", "libx265"]
+CODECS = {
+    "H.264": "libx264",
+    "H.265": "libx265"
+}
 
 def create_initial_menu():
     return InlineKeyboardMarkup([
@@ -49,7 +51,7 @@ def create_settings_menu(setting_type):
     elif setting_type == "preset":
         buttons = [[InlineKeyboardButton(preset, callback_data=f"preset_{preset}")] for preset in PRESETS]
     elif setting_type == "codec":
-        buttons = [[InlineKeyboardButton(codec, callback_data=f"codec_{codec}")] for codec in CODECS]
+        buttons = [[InlineKeyboardButton(codec, callback_data=f"codec_{codec}")] for codec in CODECS.keys()]
     elif setting_type == "pixel_format":
         buttons = [[InlineKeyboardButton(fmt, callback_data=f"pixfmt_{fmt}")] for fmt in PIXEL_FORMATS]
     
@@ -122,7 +124,7 @@ async def handle_callback(client, callback_query: CallbackQuery):
         )
     
     elif data.startswith("codec_"):
-        compression_settings[user_id]["codec"] = data.split("_")[1]
+        compression_settings[user_id]["codec"] = CODECS[data.split("_")[1]]
         await callback_query.edit_message_text(
             "Select pixel format:",
             reply_markup=create_settings_menu("pixel_format")
@@ -174,22 +176,21 @@ async def process_video(client, callback_query, user_id):
         width, height = map(int, resolution.split("x"))
         
         # Prepare FFmpeg command
-        stream = ffmpeg.input(input_file)
-        stream = ffmpeg.output(
-            stream,
-            output_file,
-            vcodec=compression_settings[user_id]["codec"],
-            preset=compression_settings[user_id]["preset"],
-            crf=compression_settings[user_id]["crf"],
-            pix_fmt=compression_settings[user_id]["pixel_format"],
-            vf=f'scale={width}:{height}',
-            acodec='copy'
-        )
+        ffmpeg_cmd = [
+            'ffmpeg', '-i', input_file,
+            '-c:v', compression_settings[user_id]["codec"],
+            '-preset', compression_settings[user_id]["preset"],
+            '-crf', str(compression_settings[user_id]["crf"]),
+            '-pix_fmt', compression_settings[user_id]["pixel_format"],
+            '-vf', f'scale={width}:{height}',
+            '-c:a', 'copy',
+            output_file
+        ]
         
         # Run FFmpeg
         await status_message.edit_text("Compressing video...")
         process = await asyncio.create_subprocess_exec(
-            *ffmpeg.compile(stream),
+            *ffmpeg_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
@@ -197,10 +198,15 @@ async def process_video(client, callback_query, user_id):
         
         # Extract thumbnail
         thumbnail_path = f"{output_file}_thumb.jpg"
-        thumb_stream = ffmpeg.input(output_file, ss='00:00:01')
-        thumb_stream = ffmpeg.output(thumb_stream, thumbnail_path, vframes=1)
+        thumb_cmd = [
+            'ffmpeg', '-i', output_file,
+            '-ss', '00:00:01',
+            '-vframes', '1',
+            thumbnail_path
+        ]
+        
         process = await asyncio.create_subprocess_exec(
-            *ffmpeg.compile(thumb_stream),
+            *thumb_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
