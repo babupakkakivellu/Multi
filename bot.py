@@ -1,9 +1,3 @@
-"""
-Telegram Video Compression Bot
------------------------------
-A comprehensive bot for video compression using Pyrogram and FFmpeg.
-Version: 1.0
-"""
 
 import os
 import time
@@ -516,27 +510,52 @@ class VideoProcessor:
             raise Exception(f"Validation failed: {str(e)}")
 
     async def extract_thumbnail(self):
-        """Extract thumbnail with error handling"""
-        try:
-            await self.progress_message.edit_text("🖼️ Extracting thumbnail...")
-            metadata = await self.metadata.extract()
-            middle_time = metadata['duration'] / 2
-            
-            cmd = [
-                'ffmpeg', '-ss', str(middle_time),
-                '-i', self.input_file,
-                '-vframes', '1',
-                '-vf', 'scale=320:-1',
-                '-y', self.thumb_path
-            ]
-            process = subprocess.run(cmd, capture_output=True, text=True)
-            
-            if process.returncode != 0:
-                raise Exception(f"FFmpeg error: {process.stderr}")
+    """Extract thumbnail with proper size and format"""
+    try:
+        self.thumb_path = f"{self.input_file}_thumb.jpg"
+        metadata = await self.metadata.extract()
+        middle_time = metadata['duration'] / 2
+        
+        # Enhanced thumbnail extraction command
+        cmd = [
+            'ffmpeg', '-ss', str(middle_time),
+            '-i', self.input_file,
+            '-vframes', '1',
+            '-vf', 'scale=320:-1',  # Width 320, maintain aspect ratio
+            '-q:v', '2',  # High quality
+            '-f', 'image2',  # Force image format
+            '-y', self.thumb_path
+        ]
+        
+        process = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        if process.returncode != 0:
+            raise Exception(f"FFmpeg thumbnail error: {process.stderr.decode()}")
 
-            await self.tracker.next_step()
-        except Exception as e:
-            raise Exception(f"Thumbnail extraction failed: {str(e)}")
+        # Verify thumbnail was created
+        if not os.path.exists(self.thumb_path):
+            raise Exception("Thumbnail creation failed")
+
+        # Optimize thumbnail size if needed
+        if os.path.getsize(self.thumb_path) > 200 * 1024:  # If larger than 200KB
+            optimize_cmd = [
+                'ffmpeg', '-i', self.thumb_path,
+                '-vf', 'scale=320:-1',
+                '-q:v', '5',  # Lower quality for size reduction
+                '-y', f"{self.thumb_path}.temp"
+            ]
+            subprocess.run(optimize_cmd, check=True)
+            os.replace(f"{self.thumb_path}.temp", self.thumb_path)
+
+        await self.tracker.next_step()
+        
+    except Exception as e:
+        logger.error(f"Thumbnail extraction error: {str(e)}")
+        raise Exception(f"Thumbnail extraction failed: {str(e)}")
 
     async def compress_video(self):
         """Compress video with advanced settings"""
@@ -583,48 +602,87 @@ class VideoProcessor:
             raise Exception(f"Compression failed: {str(e)}")
 
     async def upload_video(self, upload_format: str):
-        """Upload processed video with proper metadata"""
-        try:
-            metadata = await self.metadata.extract()
-            caption = self.generate_caption(metadata)
-            
-            if upload_format == "video":
-                await self.client.send_video(
-                    self.chat_id,
-                    self.output_file,
-                    thumb=self.thumb_path,
-                    duration=int(metadata['duration']),
-                    width=metadata['width'],
-                    height=metadata['height'],
-                    caption=caption,
-                    supports_streaming=True,
-                    progress=lambda current, total: self.tracker.update_progress(
-                        current, total,
-                        "📤 Uploading",
-                        "Almost done..."
-                    )
-                )
-            else:
-                await self.client.send_document(
-                    self.chat_id,
-                    self.output_file,
-                    thumb=self.thumb_path,
-                    caption=caption,
-                    progress=lambda current, total: self.tracker.update_progress(
-                        current, total,
-                        "📤 Uploading",
-                        "Almost done..."
-                    )
-                )
-            
-            await self.progress_message.edit_text(
-                "✅ Video processing completed!\n"
-                "Check the compressed video above."
-            )
-            
-        except Exception as e:
-            raise Exception(f"Upload failed: {str(e)}")
+    """Upload processed video with all necessary parameters"""
+    try:
+        # Get bot username first
+        bot_info = await self.client.get_me()
+        
+        # Get video metadata
+        metadata = await self.metadata.extract()
+        
+        # Generate caption
+        caption = (
+            "🎥 **Compressed Video**\n\n"
+            f"📊 **Statistics:**\n"
+            f"• Resolution: {metadata['width']}x{metadata['height']}\n"
+            f"• Duration: {int(metadata['duration'])} seconds\n"
+            f"• Original Size: {humanize.naturalsize(os.path.getsize(self.input_file))}\n"
+            f"• Compressed Size: {humanize.naturalsize(os.path.getsize(self.output_file))}\n"
+            f"• Space Saved: {(1 - os.path.getsize(self.output_file)/os.path.getsize(self.input_file)) * 100:.1f}%\n\n"
+            f"⚙️ **Settings Used:**\n"
+            f"• Preset: {self.settings['preset']}\n"
+            f"• CRF: {self.settings['crf']}\n"
+            f"• Codec: {self.settings['codec']}\n"
+            f"• Pixel Format: {self.settings['pixel_format']}\n\n"
+            f"🤖 Compressed by @{bot_info.username}"
+        )
 
+        if upload_format == "video":
+            await self.client.send_video(
+                chat_id=self.chat_id,
+                video=self.output_file,
+                caption=caption,
+                duration=int(metadata['duration']),
+                width=metadata['width'],
+                height=metadata['height'],
+                thumb=self.thumb_path,
+                supports_streaming=True,
+                file_name=f"compressed_video_{int(time.time())}.mp4",
+                progress=lambda current, total: self.tracker.update_progress(
+                    current, total,
+                    "📤 Uploading",
+                    "Almost done..."
+                ),
+                reply_to_message_id=self.message.id
+            )
+        else:
+            await self.client.send_document(
+                chat_id=self.chat_id,
+                document=self.output_file,
+                caption=caption,
+                thumb=self.thumb_path,
+                file_name=f"compressed_video_{int(time.time())}.mp4",
+                progress=lambda current, total: self.tracker.update_progress(
+                    current, total,
+                    "📤 Uploading",
+                    "Almost done..."
+                ),
+                reply_to_message_id=self.message.id,
+                force_document=True
+            )
+
+        # Send success message
+        await self.progress_message.edit_text(
+            "✅ Video processing completed!\n"
+            "Check the compressed video above."
+        )
+
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        await self.upload_video(upload_format)  # Retry upload
+        
+    except Exception as e:
+        logger.error(f"Upload error: {str(e)}")
+        error_message = (
+            "❌ Failed to upload the compressed video.\n"
+            f"Error: {str(e)}\n"
+            "Please try again or contact support."
+        )
+        await self.progress_message.edit_text(error_message)
+        raise Exception(f"Upload failed: {str(e)}")
+
+
+       
     def generate_caption(self, metadata: Dict) -> str:
         """Generate detailed caption with compression statistics"""
         try:
