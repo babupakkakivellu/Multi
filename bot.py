@@ -12,7 +12,7 @@ BOT_TOKEN = "8125717355:AAGEqXec28WfZ5V_wb4bkKoSyTt_slw6x2I"
 # Initialize your Telegram bot
 app = Client(
     "video_compression_bot",
-    api_id=API_ID
+    api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
 )
