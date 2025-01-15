@@ -5,7 +5,8 @@ import os
 import time
 import math
 from datetime import datetime
-import ffmpeg
+import subprocess
+import json
 
 # Bot configuration
 app = Client(
@@ -96,6 +97,70 @@ def format_size(size):
         unit += 1
     return f"{size:.2f} {units[unit]}"
 
+def get_video_duration(file_path):
+    """Get video duration using ffprobe"""
+    try:
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'json',
+            file_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        data = json.loads(result.stdout)
+        return float(data['format']['duration'])
+    except Exception as e:
+        print(f"Error getting duration: {str(e)}")
+        return 0
+
+def extract_thumbnail(input_file, thumbnail_file, duration):
+    """Extract thumbnail using ffmpeg subprocess"""
+    try:
+        thumbnail_time = duration / 2
+        cmd = [
+            'ffmpeg',
+            '-ss', str(thumbnail_time),
+            '-i', input_file,
+            '-vframes', '1',
+            '-q:v', '2',
+            thumbnail_file,
+            '-y'
+        ]
+        subprocess.run(cmd, check=True)
+        return True
+    except Exception as e:
+        print(f"Error extracting thumbnail: {str(e)}")
+        return False
+
+async def compress_video(input_file, output_file, settings):
+    """Compress video using ffmpeg subprocess"""
+    try:
+        width, height = RESOLUTIONS[settings['resolution']]
+        cmd = [
+            'ffmpeg',
+            '-i', input_file,
+            '-c:v', settings['codec'],
+            '-preset', settings['preset'],
+            '-crf', settings['crf'],
+            '-pix_fmt', settings['pixfmt'],
+            '-vf', f'scale={width}:{height}',
+            '-y',
+            output_file
+        ]
+        process = subprocess.Popen(cmd, stderr=subprocess.PIPE, universal_newlines=True)
+        
+        # Here you could implement real-time progress monitoring by parsing ffmpeg output
+        process.wait()
+        
+        if process.returncode != 0:
+            raise Exception("FFmpeg compression failed")
+        
+        return True
+    except Exception as e:
+        print(f"Error compressing video: {str(e)}")
+        return False
+
 @app.on_message(filters.document | filters.video)
 async def handle_video(client, message):
     user_id = message.from_user.id
@@ -118,7 +183,6 @@ async def handle_video(client, message):
 async def compression_settings(client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     
-    # Resolution buttons
     resolution_buttons = [
         [InlineKeyboardButton(res, callback_data=f"res_{res}") 
          for res in list(RESOLUTIONS.keys())[i:i+2]]
@@ -140,7 +204,6 @@ async def handle_resolution(client, callback_query: CallbackQuery):
     resolution = callback_query.data.split("_")[1]
     user_settings[user_id]['resolution'] = resolution
     
-    # Preset buttons
     preset_buttons = [
         [InlineKeyboardButton(preset, callback_data=f"preset_{preset}") 
          for preset in PRESETS[i:i+3]]
@@ -162,7 +225,6 @@ async def handle_preset(client, callback_query: CallbackQuery):
     preset = callback_query.data.split("_")[1]
     user_settings[user_id]['preset'] = preset
     
-    # CRF buttons
     crf_buttons = [
         [InlineKeyboardButton(str(crf), callback_data=f"crf_{crf}") 
          for crf in range(start, start+5)]
@@ -184,7 +246,6 @@ async def handle_crf(client, callback_query: CallbackQuery):
     crf = callback_query.data.split("_")[1]
     user_settings[user_id]['crf'] = crf
     
-    # Pixel format buttons
     pix_fmt_buttons = [[InlineKeyboardButton(fmt, callback_data=f"pixfmt_{fmt}") 
                        for fmt in PIXEL_FORMATS]]
     
@@ -203,7 +264,6 @@ async def handle_pixfmt(client, callback_query: CallbackQuery):
     pixfmt = callback_query.data.split("_")[1]
     user_settings[user_id]['pixfmt'] = pixfmt
     
-    # Codec buttons
     codec_buttons = [[InlineKeyboardButton(codec, callback_data=f"codec_{codec}") 
                      for codec in CODECS]]
     
@@ -222,7 +282,6 @@ async def handle_codec(client, callback_query: CallbackQuery):
     codec = callback_query.data.split("_")[1]
     user_settings[user_id]['codec'] = codec
     
-    # Upload format buttons
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("Video", callback_data="upload_video"),
          InlineKeyboardButton("Document", callback_data="upload_document")],
@@ -244,7 +303,6 @@ async def handle_upload_format(client, callback_query: CallbackQuery):
         "Please send the desired filename for the compressed file (include extension):"
     )
     
-    # Set state to await filename
     user_settings[user_id]['awaiting_filename'] = True
 
 @app.on_message(filters.text & filters.private)
@@ -256,7 +314,6 @@ async def handle_filename(client, message):
         user_settings[user_id]['output_filename'] = filename
         user_settings[user_id]['awaiting_filename'] = False
         
-        # Show final confirmation
         settings = user_settings[user_id]
         confirmation_text = (
             f"Compression Settings:\n"
@@ -281,7 +338,6 @@ async def process_video(client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     settings = user_settings[user_id]
     
-    # Create progress message
     progress_msg = await callback_query.message.reply_text("Starting download...")
     
     try:
@@ -292,43 +348,26 @@ async def process_video(client, callback_query: CallbackQuery):
             progress=download_tracker.update_progress
         )
         
-        # Update progress message for compression
         await progress_msg.edit_text("Starting compression...")
         
-        # Get output resolution
-        width, height = RESOLUTIONS[settings['resolution']]
-        
-        # Prepare output filename
         output_file = f"compressed_{settings['output_filename']}"
         
-        # Extract thumbnail from middle of video
-        probe = ffmpeg.probe(input_file)
-        duration = float(probe['streams'][0]['duration'])
-        thumbnail_time = duration / 2
+        # Get video duration and extract thumbnail
+        duration = get_video_duration(input_file)
         thumbnail_file = f"thumb_{settings['output_filename']}.jpg"
         
-        ffmpeg.input(input_file, ss=thumbnail_time) \
-              .output(thumbnail_file, vframes=1) \
-              .overwrite_output() \
-              .run(capture_stdout=True, capture_stderr=True)
+        if not extract_thumbnail(input_file, thumbnail_file, duration):
+            await progress_msg.edit_text("Error: Failed to extract thumbnail")
+            return
         
         # Compress video
-        compress_tracker = ProgressTracker(progress_msg, "Compressing")
-        
-        stream = ffmpeg.input(input_file)
-        stream = ffmpeg.output(stream, output_file,
-                             **{
-                                 'c:v': settings['codec'],
-                                 'preset': settings['preset'],
-                                 'crf': settings['crf'],
-                                 'pix_fmt': settings['pixfmt'],
-                                 'vf': f'scale={width}:{height}'
-                             })
-        
-        ffmpeg.run(stream, overwrite_output=True)
+        if not await compress_video(input_file, output_file, settings):
+            await progress_msg.edit_text("Error: Failed to compress video")
+            return
         
         # Upload file
         upload_tracker = ProgressTracker(progress_msg, "Uploading")
+        width, height = RESOLUTIONS[settings['resolution']]
         
         if settings['upload_format'] == 'video':
             await client.send_video(
@@ -363,7 +402,6 @@ async def process_video(client, callback_query: CallbackQuery):
         except:
             pass
         
-        # Clear user settings
         if user_id in user_settings:
             del user_settings[user_id]
 
