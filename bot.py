@@ -1,366 +1,257 @@
 import os
-import logging
 import asyncio
-from typing import Dict, Optional
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-from pyrogram.errors import RPCError
-from ffmpeg import FFmpeg, Progress
-from ffmpeg.probe import Probe
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Bot configuration
-API_ID = "YOUR_API_ID"
-API_HASH = "YOUR_API_HASH"
-BOT_TOKEN = "YOUR_BOT_TOKEN"
-
-# Constants
-MAX_CONCURRENT_JOBS = 5  # Limit simultaneous processing
-RESOLUTIONS = ["144p", "240p", "360p", "480p", "720p", "1080p", "2K", "4K"]
-PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"]
-CRF_VALUES = list(range(15, 31))
-PIXEL_FORMATS = ["yuv420p", "yuv444p", "rgb24"]
-CODECS = ["libx264", "libx265", "vp9"]
+import ffmpeg
+from PIL import Image
+import json
+import logging
+from loguru import logger
 
 # Initialize Pyrogram client
-app = Client("video_compress_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = Client("video_compressor_bot", api_id="YOUR_API_ID", api_hash="YOUR_API_HASH")
 
-# User session management
-class UserSession:
-    def __init__(self):
-        self.semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
-        self.sessions: Dict[int, dict] = {}
+# Logging setup
+logger.add("bot.log", rotation="10 MB", level="INFO")
 
-    async def create_session(self, user_id: int):
-        async with self.semaphore:
-            self.sessions[user_id] = {
-                "step": "start",
-                "compression_settings": {
-                    "resolution": "720p",
-                    "preset": "medium",
-                    "crf": 23,
-                    "pixel_format": "yuv420p",
-                    "codec": "libx264"
-                },
-                "file_info": None,
-                "upload_format": None,
-                "filename": None,
-                "message_stack": []
-            }
+# User state management
+user_states = {}
+queues = {}
 
-    def get_session(self, user_id: int) -> Optional[dict]:
-        return self.sessions.get(user_id)
+# Database (for simplicity, using JSON)
+DB_FILE = "bot_data.json"
+if not os.path.exists(DB_FILE):
+    with open(DB_FILE, "w") as f:
+        json.dump({}, f)
 
-    async def clear_session(self, user_id: int):
-        if user_id in self.sessions:
-            # Cleanup temporary files if any
-            session = self.sessions[user_id]
-            for file in [session.get('file_path'), session.get('output_path'), session.get('thumbnail_path')]:
-                if file and os.path.exists(file):
-                    os.remove(file)
-            del self.sessions[user_id]
+def load_db():
+    with open(DB_FILE, "r") as f:
+        return json.load(f)
 
-user_sessions = UserSession()
+def save_db(data):
+    with open(DB_FILE, "w") as f:
+        json.dump(data, f)
 
-# Menu builders
-def main_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📁 Compress File", callback_data="compress")],
-        [InlineKeyboardButton("🛠 Settings", callback_data="settings")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
-    ])
-
-def settings_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📏 Resolution", callback_data="set_resolution")],
-        [InlineKeyboardButton("⚙️ Preset", callback_data="set_preset")],
-        [InlineKeyboardButton("🎚 CRF", callback_data="set_crf")],
-        [InlineKeyboardButton("🎨 Pixel Format", callback_data="set_pixel_format")],
-        [InlineKeyboardButton("🔌 Codec", callback_data="set_codec")],
-        [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
-    ])
-
-def paginated_menu(items, page=0, items_per_page=8, prefix=""):
-    start = page * items_per_page
-    end = start + items_per_page
-    buttons = []
-    
-    for item in items[start:end]:
-        buttons.append([InlineKeyboardButton(str(item), callback_data=f"{prefix}_{item}")])
-    
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"page_{page-1}_{prefix}"))
-    if end < len(items):
-        nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"page_{page+1}_{prefix}"))
-    
-    if nav_buttons:
-        buttons.append(nav_buttons)
-    
-    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="settings")])
-    return InlineKeyboardMarkup(buttons)
-
-# Progress handlers
-async def progress_callback(progress: Progress, status: str, message: Message):
+# Helper functions
+def extract_thumbnail(video_path, thumbnail_path):
+    """Extract thumbnail from the middle of the video."""
     try:
-        await message.edit_text(
-            f"**{status}**\n"
-            f"Progress: {progress.percent:.2f}%\n"
-            f"Speed: {progress.speed}x\n"
-            f"ETA: {progress.eta}"
+        (
+            ffmpeg.input(video_path, ss="50%")
+            .filter("scale", 320, -1)
+            .output(thumbnail_path, vframes=1)
+            .overwrite_output()
+            .run(capture_stdout=True, capture_stderr=True)
         )
-    except RPCError:
-        pass
+    except Exception as e:
+        logger.error(f"Thumbnail extraction failed: {e}")
 
-# Handle /start command
-@app.on_message(filters.command("start"))
-async def start(client, message: Message):
-    await user_sessions.create_session(message.from_user.id)
-    await message.reply_text(
-        "🎥 **Video Compression Bot**\n\n"
-        "Send me a video/document or choose an option:",
-        reply_markup=main_menu()
-    )
+async def run_ffmpeg(input_path, output_path, resolution, preset, crf, pixel_format, codec, progress_callback):
+    """Run FFmpeg compression process with progress tracking."""
+    try:
+        width, height = map(int, resolution.split("x"))
+        process = (
+            ffmpeg.input(input_path)
+            .output(
+                output_path,
+                vf=f"scale={width}:{height}",
+                preset=preset,
+                crf=crf,
+                pix_fmt=pixel_format,
+                vcodec=codec,
+                acodec="copy",
+            )
+            .overwrite_output()
+            .global_args("-progress", "pipe:1")
+            .run_async(pipe_stdout=True, pipe_stderr=True)
+        )
 
-# Handle media messages
+        while True:
+            line = process.stdout.readline().decode().strip()
+            if not line:
+                break
+            if "out_time_ms" in line:
+                time_ms = int(line.split("=")[1])
+                duration_ms = float(ffmpeg.probe(input_path)["format"]["duration"]) * 1000
+                progress = min(time_ms / duration_ms, 1.0)
+                await progress_callback(progress)
+
+        process.wait()
+        return True
+    except Exception as e:
+        logger.error(f"FFmpeg process failed: {e}")
+        return False
+
+# Bot handlers
 @app.on_message(filters.video | filters.document)
-async def handle_media(client, message: Message):
+async def handle_video_or_document(client: Client, message: Message):
     user_id = message.from_user.id
-    session = user_sessions.get_session(user_id)
-    
-    if not session:
-        await message.reply_text("❗ Please start the bot with /start first")
+    file_name = message.video.file_name if message.video else message.document.file_name
+    file_size = message.video.file_size if message.video else message.document.file_size
+
+    if file_size > 2 * 1024 * 1024 * 1024:  # 2GB limit
+        await message.reply("❌ File size exceeds 2GB. Please send a smaller file.")
         return
-    
-    file_info = {
+
+    # Save user state
+    if user_id not in user_states:
+        user_states[user_id] = {"queue": []}
+    user_states[user_id]["queue"].append({
         "file_id": message.video.file_id if message.video else message.document.file_id,
-        "file_name": message.video.file_name if message.video else message.document.file_name,
-        "mime_type": message.video.mime_type if message.video else message.document.mime_type
-    }
-    
-    session["file_info"] = file_info
-    session["step"] = "compress"
-    
-    await message.reply_text(
-        f"📁 **File Received**: {file_info['file_name']}\n"
-        "Choose an action:",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🛠 Compression Settings", callback_data="settings")],
-            [InlineKeyboardButton("⚡ Start Compression", callback_data="start_compress")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
-        ])
+        "file_name": file_name,
+        "file_size": file_size,
+        "step": "menu_selection",
+    })
+
+    # Show menu selection
+    await message.reply(
+        f"📥 Received file: `{file_name}` ({file_size / (1024 * 1024):.2f} MB)\nWhat would you like to do?",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("Compress", callback_data="compress")],
+                [InlineKeyboardButton("Cancel", callback_data="cancel")],
+            ]
+        ),
     )
 
-# Callback query handler
 @app.on_callback_query()
-async def handle_callback(client, callback_query):
+async def handle_callback_query(client: Client, callback_query):
     user_id = callback_query.from_user.id
     data = callback_query.data
-    session = user_sessions.get_session(user_id)
-    
-    if not session:
-        await callback_query.answer("Session expired! Please start over with /start")
+
+    if user_id not in user_states or not user_states[user_id]["queue"]:
+        await callback_query.answer("Session expired. Please send the file again.")
         return
-    
-    try:
-        if data == "main_menu":
-            await callback_query.message.edit_text(
-                "🎥 **Main Menu**\nChoose an option:",
-                reply_markup=main_menu()
-            )
-        elif data == "settings":
-            await callback_query.message.edit_text(
-                "⚙️ **Compression Settings**\nCurrent settings:\n"
-                f"Resolution: {session['compression_settings']['resolution']}\n"
-                f"Preset: {session['compression_settings']['preset']}\n"
-                f"CRF: {session['compression_settings']['crf']}\n"
-                f"Pixel Format: {session['compression_settings']['pixel_format']}\n"
-                f"Codec: {session['compression_settings']['codec']}",
-                reply_markup=settings_menu()
-            )
-        elif data.startswith("set_"):
-            setting_type = data.split("_")[1]
-            await show_setting_menu(callback_query, setting_type)
-        elif data.startswith("page_"):
-            _, page, prefix = data.split("_")
-            await handle_pagination(callback_query, int(page), prefix)
-        elif data.startswith(("res_", "preset_", "crf_", "pix_", "codec_")):
-            await handle_setting_selection(callback_query, data)
-        elif data == "start_compress":
-            await handle_compress_start(callback_query)
-        elif data == "cancel":
-            await user_sessions.clear_session(user_id)
-            await callback_query.message.edit_text("❌ Operation cancelled")
+
+    current_task = user_states[user_id]["queue"][0]
+
+    if data == "cancel":
+        user_states[user_id]["queue"].pop(0)
+        await callback_query.message.edit_text("❌ Operation canceled.")
+        if user_states[user_id]["queue"]:
+            await callback_query.message.reply("Processing next file...")
         else:
-            await callback_query.answer("⚠️ Invalid option selected")
+            del user_states[user_id]
+        return
 
-    except Exception as e:
-        logger.error(f"Error handling callback: {str(e)}")
-        await callback_query.answer("❌ An error occurred. Please try again.")
+    if current_task["step"] == "menu_selection" and data == "compress":
+        # Show compression settings menu
+        current_task["step"] = "compress_settings"
+        await callback_query.message.edit_text(
+            "⚙️ Select compression settings:",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("Resolution", callback_data="resolution"),
+                        InlineKeyboardButton("CRF", callback_data="crf"),
+                    ],
+                    [
+                        InlineKeyboardButton("Preset", callback_data="preset"),
+                        InlineKeyboardButton("Pixel Format", callback_data="pixel_format"),
+                    ],
+                    [
+                        InlineKeyboardButton("Codec", callback_data="codec"),
+                        InlineKeyboardButton("Thumbnail", callback_data="thumbnail"),
+                    ],
+                    [InlineKeyboardButton("Confirm", callback_data="confirm_settings")],
+                    [InlineKeyboardButton("Cancel", callback_data="cancel")],
+                ]
+            ),
+        )
 
-async def show_setting_menu(callback_query, setting_type):
-    user_id = callback_query.from_user.id
-    session = user_sessions.get_session(user_id)
-    
-    items = {
-        "resolution": RESOLUTIONS,
-        "preset": PRESETS,
-        "crf": CRF_VALUES,
-        "pixel": PIXEL_FORMATS,
-        "codec": CODECS
-    }[setting_type]
-    
-    prefix = {
-        "resolution": "res",
-        "preset": "preset",
-        "crf": "crf",
-        "pixel": "pix",
-        "codec": "codec"
-    }[setting_type]
-    
-    await callback_query.message.edit_text(
-        f"⚙️ Select {setting_type.replace('_', ' ').title()}:",
-        reply_markup=paginated_menu(items, prefix=prefix)
-    )
+    elif current_task["step"] == "compress_settings" and data == "confirm_settings":
+        # Show upload format menu
+        current_task["step"] = "upload_format"
+        await callback_query.message.edit_text(
+            "📤 Select upload format:",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("Document", callback_data="upload_document")],
+                    [InlineKeyboardButton("Video", callback_data="upload_video")],
+                    [InlineKeyboardButton("Cancel", callback_data="cancel")],
+                ]
+            ),
+        )
 
-async def handle_pagination(callback_query, page, prefix):
-    items = {
-        "res": RESOLUTIONS,
-        "preset": PRESETS,
-        "crf": CRF_VALUES,
-        "pix": PIXEL_FORMATS,
-        "codec": CODECS
-    }[prefix]
-    
-    await callback_query.message.edit_text(
-        f"⚙️ Select {prefix.replace('_', ' ').title()}:",
-        reply_markup=paginated_menu(items, page=page, prefix=prefix)
-    )
+    elif current_task["step"] == "upload_format" and data in ["upload_document", "upload_video"]:
+        # Ask for filename
+        current_task["upload_format"] = data.split("_")[1]
+        current_task["step"] = "rename_file"
+        await callback_query.message.edit_text("📝 Enter the new filename for the output:")
 
-async def handle_setting_selection(callback_query, data):
-    user_id = callback_query.from_user.id
-    session = user_sessions.get_session(user_id)
-    setting_type, value = data.split("_", 1)
-    
-    setting_map = {
-        "res": ("resolution", value),
-        "preset": ("preset", value),
-        "crf": ("crf", int(value)),
-        "pix": ("pixel_format", value),
-        "codec": ("codec", value)
-    }
-    
-    setting_key, setting_value = setting_map[setting_type]
-    session["compression_settings"][setting_key] = setting_value
-    
-    await callback_query.answer(f"✅ {setting_key.title()} set to {value}")
-    await callback_query.message.edit_text(
-        f"⚙️ Updated {setting_key.replace('_', ' ').title()} to {value}",
-        reply_markup=settings_menu()
-    )
+    elif current_task["step"] == "rename_file" and callback_query.message.text.startswith("Enter"):
+        # Confirm and start processing
+        current_task["new_filename"] = callback_query.message.text.strip()
+        current_task["step"] = "processing"
 
-async def handle_compress_start(callback_query):
-    user_id = callback_query.from_user.id
-    session = user_sessions.get_session(user_id)
-    
-    await callback_query.message.edit_text("📤 Downloading file...")
-    
-    try:
         # Download file
-        file_path = await callback_query.message._client.download_media(
-            session["file_info"]["file_id"],
-            progress=progress_callback,
-            progress_args=("📥 Downloading", callback_query.message)
-        )
-        
+        file_id = current_task["file_id"]
+        original_file_name = current_task["file_name"]
+        input_path = f"downloads/{original_file_name}"
+        output_path = f"compressed_{original_file_name}"
+
+        progress_msg = await callback_query.message.edit_text("📥 Downloading file...\nProgress: 0%")
+        await client.download_media(file_id, file_name=input_path, progress=lambda current, total: asyncio.create_task(update_progress(progress_msg, current, total)))
+
         # Extract thumbnail
-        thumbnail_path = f"thumb_{user_id}.jpg"
-        ffmpeg_thumbnail = (
-            FFmpeg()
-            .input(file_path)
-            .output(thumbnail_path, ss="00:00:05", vframes=1)
-            .overwrite_output()
+        thumbnail_path = "thumbnail.jpg"
+        extract_thumbnail(input_path, thumbnail_path)
+
+        # Run FFmpeg
+        await progress_msg.edit_text("⚙️ Compressing video...\nProgress: 0%")
+        success = await run_ffmpeg(
+            input_path,
+            output_path,
+            resolution=current_task.get("resolution", "1280x720"),  # Default resolution
+            preset=current_task.get("preset", "medium"),  # Default preset
+            crf=current_task.get("crf", 23),  # Default CRF
+            pixel_format=current_task.get("pixel_format", "yuv420p"),  # Default pixel format
+            codec=current_task.get("codec", "libx264"),  # Default codec
+            progress_callback=lambda progress: asyncio.create_task(update_progress(progress_msg, progress, 1)),
         )
-        await ffmpeg_thumbnail.execute()
-        
-        # Process file
-        output_path = f"compressed_{session['file_info']['file_name']}"
-        await process_video(file_path, output_path, session, callback_query.message)
-        
+
+        if not success:
+            await progress_msg.edit_text("❌ Compression failed.")
+            return
+
         # Upload file
-        await upload_file(
-            callback_query.message,
-            output_path,
-            thumbnail_path,
-            session["file_info"]["file_name"],
-            session.get("upload_format", "video")
-        )
-        
-    except Exception as e:
-        logger.error(f"Compression error: {str(e)}")
-        await callback_query.message.edit_text(f"❌ Error during processing: {str(e)}")
-    finally:
-        # Cleanup
-        for path in [file_path, output_path, thumbnail_path]:
-            if path and os.path.exists(path):
-                os.remove(path)
-        await user_sessions.clear_session(user_id)
+        await progress_msg.edit_text("📤 Uploading file...\nProgress: 0%")
+        thumb = Image.open(thumbnail_path)
+        width, height = thumb.size
+        duration = 0  # TODO: Extract duration from video metadata
 
-async def process_video(input_path, output_path, session, message):
-    settings = session["compression_settings"]
-    
-    ffmpeg = (
-        FFmpeg()
-        .input(input_path)
-        .output(
-            output_path,
-            vcodec=settings["codec"],
-            crf=settings["crf"],
-            preset=settings["preset"],
-            pix_fmt=settings["pixel_format"],
-            **get_resolution_args(settings["resolution"])
-        )
-        .overwrite_output()
-    )
-    
-    await ffmpeg.execute(
-        progress=progress_callback,
-        progress_args=("🔧 Compressing", message)
-    )
+        if current_task["upload_format"] == "document":
+            await client.send_document(
+                chat_id=user_id,
+                document=output_path,
+                thumb=thumbnail_path,
+                caption=current_task["new_filename"],
+                progress=lambda current, total: asyncio.create_task(update_progress(progress_msg, current, total)),
+            )
+        else:
+            await client.send_video(
+                chat_id=user_id,
+                video=output_path,
+                thumb=thumbnail_path,
+                width=width,
+                height=height,
+                duration=duration,
+                caption=current_task["new_filename"],
+                progress=lambda current, total: asyncio.create_task(update_progress(progress_msg, current, total)),
+            )
 
-async def upload_file(message, file_path, thumb_path, filename, upload_format):
-    probe = Probe(file_path)
-    video_stream = next((s for s in probe.streams if s.type == "video"), None)
-    
-    upload_args = {
-        "thumb": thumb_path,
-        "caption": filename,
-        "duration": int(float(video_stream.duration)) if video_stream else 0,
-        "width": video_stream.width if video_stream else 0,
-        "height": video_stream.height if video_stream else 0
-    }
-    
-    if upload_format == "video":
-        await message.reply_video(file_path, **upload_args)
-    else:
-        await message.reply_document(file_path, **upload_args)
+        await progress_msg.edit_text("✅ File uploaded successfully!")
+        user_states[user_id]["queue"].pop(0)
+        if user_states[user_id]["queue"]:
+            await callback_query.message.reply("Processing next file...")
+        else:
+            del user_states[user_id]
 
-def get_resolution_args(resolution):
-    resolutions = {
-        "144p": (256, 144),
-        "240p": (426, 240),
-        "360p": (640, 360),
-        "480p": (854, 480),
-        "720p": (1280, 720),
-        "1080p": (1920, 1080),
-        "2K": (2560, 1440),
-        "4K": (3840, 2160)
-    }
-    w, h = resolutions.get(resolution, (1280, 720))
-    return {"vf": f"scale={w}:{h}"}
+async def update_progress(message, current, total):
+    """Update progress in the same message."""
+    progress = current * 100 / total
+    await message.edit_text(f"{message.text.split('Progress:')[0]}Progress: {progress:.1f}%")
 
+# Start the bot
 if __name__ == "__main__":
     app.run()
