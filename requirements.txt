@@ -8,6 +8,7 @@ aiohttp>=3.9.1
 async-timeout>=4.0.3
 python-ffmpeg
 tqdm
+pillow
 
 # Optional but recommended for better performance
 uvloop>=0.17.0
