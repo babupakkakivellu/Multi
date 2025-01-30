@@ -9,6 +9,6 @@ async-timeout>=4.0.3
 python-ffmpeg
 tqdm
 pillow
-
+loguru
 # Optional but recommended for better performance
 uvloop>=0.17.0
