@@ -9,8 +9,12 @@ import logging
 from loguru import logger
 
 # Initialize Pyrogram client
-app = Client("video_compressor_bot", api_id="YOUR_API_ID", api_hash="YOUR_API_HASH")
-
+app = Client(
+    "video_compressor_bot",  # Session name (can be any string)
+    api_id="16501053",    # Your Telegram API ID
+    api_hash="d8c9b01c863dabacc484c2c06cdd0f6e",  # Your Telegram API Hash
+    bot_token="8008220392:AAGZaGA2VbJ4IwOwrRhfM8r-Fm1ZUgUuf5U"  # Your bot token from BotFather
+)
 # Logging setup
 logger.add("bot.log", rotation="10 MB", level="INFO")
 
